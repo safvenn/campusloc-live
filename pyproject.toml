@@ -1,2 +1,18 @@
+[project]
+name = "campusloc"
+version = "0.1.0"
+description = "CampusLoc Live Positioning & Floor Dwell Analytics"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "pyjwt>=2.8.0",
+    "paho-mqtt>=2.1.0",
+    "joblib>=1.3.0",
+    "scikit-learn==1.8.0",
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "psycopg2-binary>=2.9.0"
+]
+
 [tool.vercel]
 entrypoint = "live:app"
