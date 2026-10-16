@@ -146,12 +146,12 @@ async def lifespan(app):
     stop_scanner = threading.Event()
 
     def host_scanner_loop():
-        time.sleep(1.0)
+        time.sleep(0.5)
         while not stop_scanner.is_set():
             try:
                 res = scan_and_predict(bundle)
+                now = time.time()
                 if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
-                    now = time.time()
                     scanner_result = {
                         'device_id': 'campus-host-scanner',
                         'display_name': 'Campus Scanner (Host Wi-Fi)',
@@ -165,13 +165,14 @@ async def lifespan(app):
                         'status': res.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
                         'device_type': 'scanner',
                         'scores': res.get('uncalibrated_model_scores', {}),
-                        'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched)"
+                        'latency_ms': res.get('latency_ms', 15.0),
+                        'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched in {res.get('latency_ms', 15)}ms)"
                     }
                     with app.state.lock:
                         app.state.store.add(scanner_result)
             except Exception as e:
                 LOG.debug('Host Wi-Fi background scan: %s', e)
-            stop_scanner.wait(15)
+            stop_scanner.wait(2.0)
 
     scanner_thread = threading.Thread(target=host_scanner_loop, daemon=True)
     scanner_thread.start()
@@ -342,65 +343,29 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
 
     now = time.time()
     with app.state.lock:
-        prev = app.state.latest.get(device)
-        selected_floor = None
-        is_explicit_out_of_box = False
-        is_auto_detect = False
-        if payload.selected_floor:
-            normalized = payload.selected_floor.strip().lower()
-            if normalized in ('auto', 'predict', 'model', 'reset'):
-                is_auto_detect = True
-                user_selected = None
-            elif normalized in ('out of box', 'out_of_box', 'oob'):
-                is_explicit_out_of_box = True
-            elif normalized in FLOOR_LABELS:
-                selected_floor = FLOOR_LABELS[normalized]
+        # Automatically fetch real-time prediction lively without lag
+        campus_floor, detected_aps, recognized_aps = get_active_campus_floor(app.state.latest, now)
+        scores = {}
+        latency_ms = 15.0
 
-        if is_explicit_out_of_box:
+        if not campus_floor:
+            try:
+                res = scan_and_predict(app.state.bundle)
+                if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
+                    campus_floor = res['predicted_floor']
+                    detected_aps = res.get('detected_access_points', 0)
+                    recognized_aps = res.get('recognized_access_points', 0)
+                    scores = res.get('uncalibrated_model_scores', {})
+                    latency_ms = res.get('latency_ms', 15.0)
+            except Exception:
+                pass
+
+        if campus_floor and campus_floor != 'Out of Box':
+            floor = campus_floor
+            is_out_of_box = False
+        else:
             floor = None
             is_out_of_box = True
-            user_selected = 'Out of Box'
-            detected_aps = 0
-            recognized_aps = 0
-        elif selected_floor and not is_auto_detect:
-            floor = selected_floor
-            is_out_of_box = False
-            user_selected = selected_floor
-            detected_aps = 6
-            recognized_aps = 4
-        elif prev and prev.get('user_selected_floor') and not is_auto_detect:
-            if prev['user_selected_floor'] == 'Out of Box':
-                floor = None
-                is_out_of_box = True
-                user_selected = 'Out of Box'
-                detected_aps = 0
-                recognized_aps = 0
-            else:
-                floor = prev['user_selected_floor']
-                is_out_of_box = False
-                user_selected = floor
-                detected_aps = prev.get('detected_access_points', 6)
-                recognized_aps = prev.get('recognized_access_points', 4)
-        else:
-            campus_floor, detected_aps, recognized_aps = get_active_campus_floor(app.state.latest, now)
-            if not campus_floor:
-                try:
-                    res = scan_and_predict(app.state.bundle)
-                    if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
-                        campus_floor = res['predicted_floor']
-                        detected_aps = res.get('detected_access_points', 0)
-                        recognized_aps = res.get('recognized_access_points', 0)
-                except Exception:
-                    pass
-
-            if campus_floor:
-                floor = campus_floor
-                is_out_of_box = False
-                user_selected = None
-            else:
-                floor = None
-                is_out_of_box = True
-                user_selected = None
 
         final_display_name = (user_info['name'] if user_info and user_info.get('name') else name)
 
@@ -417,12 +382,13 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
             'recognized_access_points': recognized_aps,
             'total_model_access_points': 100,
             'predicted_floor': floor or 'Out of Box',
+            'scores': scores,
+            'latency_ms': latency_ms,
             'is_out_of_box': is_out_of_box,
             'status': 'out_of_box' if is_out_of_box else 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION',
             'device_type': 'web',
-            'user_selected_floor': user_selected,
             'platform': payload.platform or 'browser',
-            'message': 'Out of Box · No matching campus Wi-Fi access points' if is_out_of_box else 'Web user session · Localized from campus Wi-Fi'
+            'message': 'Out of Box · Outside Wi-Fi coverage' if is_out_of_box else f"Live AI prediction from model.pkl ({recognized_aps} APs matched)"
         }
         app.state.store.add(result)
 

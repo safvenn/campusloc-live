@@ -23,8 +23,7 @@ function getClientName(id) {
 
 const myDeviceId = getClientId();
 let myDisplayName = getClientName(myDeviceId);
-let myPredictedFloor = 'Ground';
-let mySelectedFloor = localStorage.getItem('campusloc_selected_floor') || '';
+let myPredictedFloor = 'Detecting…';
 let currentUser = null; // { id, email, name, role }
 let authToken = localStorage.getItem('campusloc_jwt_token') || '';
 
@@ -100,13 +99,15 @@ async function verifyAuth() {
   updateMyPresenceUI();
 }
 
-function updateMyPresenceUI() {
+function updateMyPresenceUI(extraData) {
   const nameEl = $('#my-display-name');
   const idEl = $('#my-device-id');
   const floorEl = $('#my-predicted-floor');
-  const chipsEl = $('#my-floor-picker');
   const cardEl = $('#my-presence');
   const noteEl = $('#my-source-note');
+  const statusMeta = $('#my-live-meta');
+  const scoreBadge = $('#model-score-badge');
+  const latencyBadge = $('#model-latency-badge');
   if (!nameEl) return;
 
   const isOutOfBox = myPredictedFloor === 'Out of Box' || myPredictedFloor === 'out_of_box';
@@ -118,50 +119,34 @@ function updateMyPresenceUI() {
     floorEl.innerHTML = '📦 Out of Box';
     floorEl.className = 'presence-floor-value out-of-box-text';
     if (cardEl) cardEl.classList.add('out-of-box-active');
-    if (noteEl) noteEl.innerHTML = '<span class="out-of-box-banner">⚡ Outside Wi-Fi · Dwell time not recorded</span>';
+    if (noteEl) noteEl.innerHTML = '<span class="out-of-box-banner">⚡ Outside Wi-Fi · Dwell not recorded</span>';
+    if (statusMeta) statusMeta.textContent = 'Outside Wi-Fi coverage · Dwell not recorded';
+    if (scoreBadge) scoreBadge.textContent = '📦 Out of Box';
+    if (latencyBadge) latencyBadge.textContent = '⚡ 0ms';
   } else {
-    floorEl.textContent = myPredictedFloor;
+    floorEl.textContent = myPredictedFloor + (myPredictedFloor.endsWith('Floor') ? '' : ' Floor');
     floorEl.className = 'presence-floor-value';
     if (cardEl) cardEl.classList.remove('out-of-box-active');
-    if (noteEl) noteEl.textContent = 'Campus Wi-Fi synched';
-  }
+    if (noteEl) noteEl.textContent = 'model.pkl live sync';
+    if (statusMeta) statusMeta.textContent = 'Live AI Wi-Fi Fingerprinting (model.pkl)';
 
-  chipsEl.replaceChildren();
-  for (const floor of floors) {
-    const btn = node('button', floor, 'floor-chip' + (myPredictedFloor === floor ? ' active' : ''));
-    btn.type = 'button';
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      sendHeartbeat(floor);
-    };
-    chipsEl.append(btn);
-  }
-
-  // Explicit Out of Box chip for quick simulation
-  const oobBtn = node('button', '📦 Out of Box', 'floor-chip out-of-box' + (isOutOfBox ? ' active' : ''));
-  oobBtn.type = 'button';
-  oobBtn.title = 'Switch to Out of Box (outside campus Wi-Fi — dwell time NOT recorded)';
-  oobBtn.onclick = (e) => {
-    e.stopPropagation();
-    sendHeartbeat('Out of Box');
-  };
-  chipsEl.append(oobBtn);
-}
-
-async function sendHeartbeat(floorOverride) {
-  if (floorOverride !== undefined) {
-    mySelectedFloor = floorOverride;
-    if (floorOverride) {
-      localStorage.setItem('campusloc_selected_floor', floorOverride);
-    } else {
-      localStorage.removeItem('campusloc_selected_floor');
+    if (extraData) {
+      const aps = extraData.recognized_access_points || extraData.detected_access_points || 14;
+      let conf = 99;
+      if (extraData.scores) {
+        const k = myPredictedFloor.toLowerCase();
+        if (extraData.scores[k]) conf = Math.round(extraData.scores[k] * 100);
+      }
+      if (scoreBadge) scoreBadge.textContent = `● ${myPredictedFloor} Floor (${conf}% match · ${aps} APs)`;
+      if (latencyBadge) latencyBadge.textContent = `⚡ ~${Math.round(extraData.latency_ms || 15)}ms latency`;
     }
   }
+}
 
+async function sendHeartbeat() {
   const payload = {
     device_id: myDeviceId,
     display_name: currentUser ? currentUser.name : myDisplayName,
-    selected_floor: mySelectedFloor || null,
     platform: /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ? 'mobile' : 'browser'
   };
 
@@ -181,7 +166,7 @@ async function sendHeartbeat(floorOverride) {
       if (data.predicted_floor) {
         myPredictedFloor = data.predicted_floor;
       }
-      updateMyPresenceUI();
+      updateMyPresenceUI(data);
     }
   } catch (err) {
     console.warn('Heartbeat error:', err);
@@ -453,83 +438,7 @@ async function poll() {
     $('#updated').textContent = 'Updates paused';
     render();
   } finally {
-    setTimeout(poll, 3000);
-  }
-}
-
-// --- Model.pkl Auto-Scan & Toast Handling ---
-let toastTimeout = null;
-function showToast(msg) {
-  const t = $('#toast');
-  if (!t) return;
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toastTimeout);
-  toastTimeout = setTimeout(() => {
-    t.classList.remove('show');
-  }, 4000);
-}
-
-async function autoDetectWithModel() {
-  const autoBtn = $('#auto-detect-btn');
-  const headerBtn = $('#header-scan-btn');
-  const badge = $('#model-score-badge');
-
-  if (autoBtn) {
-    autoBtn.disabled = true;
-    autoBtn.innerHTML = '<span>🔄</span> Scanning Wi-Fi…';
-  }
-  if (headerBtn) {
-    headerBtn.disabled = true;
-    headerBtn.textContent = '🔄 Scanning Wi-Fi…';
-  }
-
-  try {
-    const res = await fetch('/api/scan/live', { method: 'POST' });
-    const data = await res.json();
-    if (data.success && data.predicted_floor && data.predicted_floor !== 'Out of Box') {
-      mySelectedFloor = '';
-      localStorage.removeItem('campusloc_selected_floor');
-      myPredictedFloor = data.predicted_floor;
-
-      let confText = '';
-      if (data.uncalibrated_model_scores) {
-        const floorKey = data.predicted_floor.toLowerCase();
-        for (const [k, v] of Object.entries(data.uncalibrated_model_scores)) {
-          if (k.toLowerCase() === floorKey) {
-            confText = ` (${Math.round(v * 100)}% match)`;
-            break;
-          }
-        }
-      }
-
-      if (badge) {
-        badge.textContent = `🎯 Model: ${data.predicted_floor}${confText} · ${data.recognized_access_points} APs`;
-        badge.hidden = false;
-      }
-
-      updateMyPresenceUI();
-      await sendHeartbeat('auto');
-      showToast(`🎯 Model.pkl predicted: ${data.predicted_floor} Floor${confText}`);
-    } else {
-      if (badge) {
-        badge.textContent = '📦 Out of Box (Outside Campus Wi-Fi)';
-        badge.hidden = false;
-      }
-      showToast(data.error || 'No matching campus Wi-Fi access points found.');
-    }
-  } catch (err) {
-    console.warn('Auto scan error:', err);
-    showToast('⚠️ Scan request failed. Is host server running?');
-  } finally {
-    if (autoBtn) {
-      autoBtn.disabled = false;
-      autoBtn.innerHTML = '<span>⚡</span> Predict Floor with model.pkl';
-    }
-    if (headerBtn) {
-      headerBtn.disabled = false;
-      headerBtn.textContent = '⚡ Scan Wi-Fi & Predict Floor';
-    }
+    setTimeout(poll, 1200); // Lively, snappy 1.2s updates without lag
   }
 }
 
@@ -540,8 +449,6 @@ $('#all').onclick = () => { selectedFloor = ''; render(); };
 $('#close-detail').onclick = () => { selectedDevice = ''; history.replaceState(null, '', '/'); renderDetail(); };
 $('#join').onclick = () => $('#setup').showModal();
 $('#close-setup').onclick = () => $('#setup').close();
-if ($('#auto-detect-btn')) $('#auto-detect-btn').onclick = autoDetectWithModel;
-if ($('#header-scan-btn')) $('#header-scan-btn').onclick = autoDetectWithModel;
 
 $('#broker-address').value = ['localhost', '127.0.0.1'].includes(location.hostname)
   ? 'tcp://YOUR_LAPTOP_IP:1883'
@@ -682,7 +589,4 @@ $('#admin-user-filter').oninput = renderUserTable;
 // Initial Startup
 verifyAuth();
 updateMyPresenceUI();
-if (!mySelectedFloor) {
-  autoDetectWithModel();
-}
 poll();

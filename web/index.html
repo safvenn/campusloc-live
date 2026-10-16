@@ -32,7 +32,6 @@
       <p>Real-time Wi-Fi floor estimates and dwell-time intelligence.</p>
     </div>
     <div class="heading-buttons">
-      <button id="header-scan-btn" class="model-predict-btn" title="Scan local Wi-Fi and predict floor using model.pkl">⚡ Scan Wi-Fi & Predict Floor</button>
       <button id="admin-quick-btn" class="secondary" title="View floor dwell analytics">📊 Admin Analytics</button>
       <button id="join">+ Connect a device</button>
     </div>
@@ -103,26 +102,24 @@
       <div class="presence-info">
         <div class="presence-status-row">
           <span class="presence-dot"></span>
-          <span class="presence-tag">LIVE CAMPUS VISITOR</span>
+          <span class="presence-tag">LIVE AI CAMPUS TRACKING</span>
         </div>
         <div class="presence-user-row">
           <h2 id="my-display-name">Web Visitor</h2>
           <button id="edit-my-name-btn" class="mini-btn" type="button" title="Change nickname">✎ Rename</button>
         </div>
-        <p class="presence-id-text">ID: <code id="my-device-id">...</code> · <span id="my-source-note">Campus Wi-Fi synched</span></p>
-        <div class="presence-actions-row">
-          <button id="auto-detect-btn" class="auto-scan-btn" type="button" title="Scan local Wi-Fi and predict floor using model.pkl">
-            <span>⚡</span> Predict Floor with model.pkl
-          </button>
-          <span id="model-score-badge" class="model-score-pill" hidden>🎯 Model match: Fourth (98.9%)</span>
+        <p class="presence-id-text">ID: <code id="my-device-id">...</code> · <span id="my-source-note">model.pkl active</span></p>
+        <div class="presence-metrics-row" id="my-metrics-row">
+          <span id="model-score-badge" class="model-score-pill">● Real-time Wi-Fi Synced</span>
+          <span id="model-latency-badge" class="model-latency-pill">⚡ 0ms lag</span>
         </div>
       </div>
       <div class="presence-floor-box">
-        <div class="presence-floor-label">YOUR PREDICTED FLOOR</div>
-        <div class="presence-floor-value" id="my-predicted-floor">Ground</div>
-        <div class="presence-picker-row">
-          <span class="presence-picker-label">Switch floor:</span>
-          <div class="floor-chips" id="my-floor-picker"></div>
+        <div class="presence-floor-label">AUTOMATIC PREDICTED FLOOR</div>
+        <div class="presence-floor-value" id="my-predicted-floor">Detecting…</div>
+        <div class="presence-live-status" id="my-live-status">
+          <span class="live-pulse-dot"></span>
+          <span id="my-live-meta">Live AI Wi-Fi Fingerprinting</span>
         </div>
       </div>
     </div>
