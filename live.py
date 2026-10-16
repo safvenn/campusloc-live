@@ -144,8 +144,10 @@ async def lifespan(app):
 
     # Automatic background host Wi-Fi scanner to predict real floor using model.pkl
     stop_scanner = threading.Event()
+    last_cloud_sync = 0.0
 
     def host_scanner_loop():
+        nonlocal last_cloud_sync
         time.sleep(0.5)
         while not stop_scanner.is_set():
             try:
@@ -170,6 +172,26 @@ async def lifespan(app):
                     }
                     with app.state.lock:
                         app.state.store.add(scanner_result)
+
+                    # Forward campus scan to cloud Render server every 3s so cloud viewers see live floor
+                    if not os.getenv('RENDER') and res.get('signals') and (now - last_cloud_sync >= 3.0):
+                        last_cloud_sync = now
+                        def _sync(sigs):
+                            try:
+                                import urllib.request
+                                sync_req = urllib.request.Request(
+                                    'https://campusloc-live.onrender.com/api/scan/report',
+                                    data=json.dumps({
+                                        'device_id': 'campus-host-scanner',
+                                        'display_name': 'Campus Scanner (Host Wi-Fi)',
+                                        'signals': sigs
+                                    }).encode('utf-8'),
+                                    headers={'Content-Type': 'application/json'}
+                                )
+                                urllib.request.urlopen(sync_req, timeout=3)
+                            except Exception:
+                                pass
+                        threading.Thread(target=_sync, args=(res['signals'],), daemon=True).start()
             except Exception as e:
                 LOG.debug('Host Wi-Fi background scan: %s', e)
             stop_scanner.wait(2.0)
@@ -280,6 +302,45 @@ def predict_custom(payload: CustomScanPayload):
         return prediction
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+class RemoteScanReport(BaseModel):
+    device_id: str
+    display_name: str
+    signals: dict[str, float]
+
+
+@app.post('/api/scan/report')
+def report_remote_scan(payload: RemoteScanReport):
+    """Receive live Wi-Fi signals from an on-campus machine and predict with model.pkl."""
+    now = time.time()
+    try:
+        prediction = predict_signals(app.state.bundle, payload.signals, min_known=3)
+        floor = prediction['predicted_floor']
+        floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
+        floor_formatted = floor_map.get(floor.lower(), floor.capitalize())
+        scanner_result = {
+            'device_id': payload.device_id,
+            'display_name': payload.display_name,
+            'scan_id': f'remote-{int(now * 1000)}',
+            'captured_at': now,
+            'received_at': now,
+            'detected_access_points': len(payload.signals),
+            'recognized_access_points': prediction.get('recognized_access_points', 0),
+            'total_model_access_points': 100,
+            'predicted_floor': floor_formatted,
+            'status': prediction.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
+            'device_type': 'scanner',
+            'scores': prediction.get('uncalibrated_model_scores', {}),
+            'latency_ms': 15.0,
+            'is_out_of_box': False,
+            'message': f"Live campus Wi-Fi prediction from model.pkl ({prediction.get('recognized_access_points', 0)} APs matched)"
+        }
+        with app.state.lock:
+            app.state.store.add(scanner_result)
+        return {'success': True, 'predicted_floor': floor_formatted, **prediction}
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'is_out_of_box': True, 'predicted_floor': 'Out of Box'}
 
 
 @app.get('/api/latest/{device}')

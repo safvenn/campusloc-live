@@ -262,6 +262,7 @@ def scan_and_predict(bundle=None):
         'total_model_access_points': len(cols),
         'detected_access_points': len(signals),
         'uncalibrated_model_scores': uncalibrated,
+        'signals': signals,
         'latency_ms': elapsed_ms,
         'is_out_of_box': False,
         'message': f"Real-time prediction from model.pkl ({len(readings)} APs matched in {elapsed_ms}ms)"

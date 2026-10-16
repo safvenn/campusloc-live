@@ -7,6 +7,10 @@
       "dest": "/web/$1"
     },
     {
+      "src": "/api/(.*)",
+      "dest": "https://campusloc-live.onrender.com/api/$1"
+    },
+    {
       "src": "/",
       "dest": "/web/index.html"
     }
