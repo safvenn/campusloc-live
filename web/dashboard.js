@@ -42,7 +42,7 @@ function node(tag, text, cls) {
 }
 
 function stateLabel(r) {
-  return { live: 'Live', unlocated: 'Unable to locate', offline: 'Offline / stale' }[r.connection_status] || r.connection_status;
+  return { live: 'Live', out_of_box: 'Out of Box', unlocated: 'Unable to locate', offline: 'Offline / stale' }[r.connection_status] || r.connection_status;
 }
 
 // --- Auth Handling ---
@@ -105,11 +105,26 @@ function updateMyPresenceUI() {
   const idEl = $('#my-device-id');
   const floorEl = $('#my-predicted-floor');
   const chipsEl = $('#my-floor-picker');
+  const cardEl = $('#my-presence');
+  const noteEl = $('#my-source-note');
   if (!nameEl) return;
+
+  const isOutOfBox = myPredictedFloor === 'Out of Box' || myPredictedFloor === 'out_of_box';
 
   nameEl.textContent = currentUser ? currentUser.name + ' (' + currentUser.role + ')' : myDisplayName;
   idEl.textContent = myDeviceId;
-  floorEl.textContent = myPredictedFloor;
+
+  if (isOutOfBox) {
+    floorEl.innerHTML = '📦 Out of Box';
+    floorEl.className = 'presence-floor-value out-of-box-text';
+    if (cardEl) cardEl.classList.add('out-of-box-active');
+    if (noteEl) noteEl.innerHTML = '<span class="out-of-box-banner">⚡ Outside Wi-Fi · Dwell time not recorded</span>';
+  } else {
+    floorEl.textContent = myPredictedFloor;
+    floorEl.className = 'presence-floor-value';
+    if (cardEl) cardEl.classList.remove('out-of-box-active');
+    if (noteEl) noteEl.textContent = 'Campus Wi-Fi synched';
+  }
 
   chipsEl.replaceChildren();
   for (const floor of floors) {
@@ -121,6 +136,16 @@ function updateMyPresenceUI() {
     };
     chipsEl.append(btn);
   }
+
+  // Explicit Out of Box chip for quick simulation
+  const oobBtn = node('button', '📦 Out of Box', 'floor-chip out-of-box' + (isOutOfBox ? ' active' : ''));
+  oobBtn.type = 'button';
+  oobBtn.title = 'Switch to Out of Box (outside campus Wi-Fi — dwell time NOT recorded)';
+  oobBtn.onclick = (e) => {
+    e.stopPropagation();
+    sendHeartbeat('Out of Box');
+  };
+  chipsEl.append(oobBtn);
 }
 
 async function sendHeartbeat(floorOverride) {
@@ -165,9 +190,9 @@ async function sendHeartbeat(floorOverride) {
 
 function render() {
   $('#total').textContent = rows.length;
-  for (const [id, state] of [['live', 'live'], ['unknown', 'unlocated'], ['offline', 'offline']]) {
-    $('#' + id).textContent = rows.filter(r => r.connection_status === state).length;
-  }
+  $('#live').textContent = rows.filter(r => r.connection_status === 'live').length;
+  $('#unknown').textContent = rows.filter(r => r.connection_status === 'unlocated' || r.connection_status === 'out_of_box' || r.is_out_of_box).length;
+  $('#offline').textContent = rows.filter(r => r.connection_status === 'offline').length;
 
   // Floors counter list
   $('#floors').replaceChildren();
@@ -185,17 +210,26 @@ function render() {
 
   const query = $('#search').value.toLowerCase();
   const status = $('#state').value;
-  const visible = rows.filter(r =>
-    (r.display_name + ' ' + r.device_id).toLowerCase().includes(query) &&
-    (status === 'all' || r.connection_status === status) &&
-    (!selectedFloor || (r.connection_status === 'live' && r.predicted_floor === selectedFloor))
-  );
+  const visible = rows.filter(r => {
+    const isOutOfBox = r.connection_status === 'out_of_box' || r.predicted_floor === 'Out of Box' || r.is_out_of_box;
+    const matchesQuery = (r.display_name + ' ' + r.device_id).toLowerCase().includes(query);
+    const matchesStatus = status === 'all'
+      ? true
+      : status === 'out_of_box'
+        ? isOutOfBox
+        : status === 'unlocated'
+          ? (r.connection_status === 'unlocated' || isOutOfBox)
+          : r.connection_status === status;
+    const matchesFloor = !selectedFloor || (!isOutOfBox && r.connection_status === 'live' && r.predicted_floor === selectedFloor);
+    return matchesQuery && matchesStatus && matchesFloor;
+  });
 
   $('#filter-note').textContent = selectedFloor ? 'Showing live estimates on ' + selectedFloor : '';
   $('#devices').replaceChildren();
 
   for (const r of visible) {
     const isMe = r.device_id === myDeviceId;
+    const isOutOfBox = r.connection_status === 'out_of_box' || r.predicted_floor === 'Out of Box' || r.is_out_of_box;
     const card = node('article', undefined, 'device' + (isMe ? ' my-device' : ''));
     const identity = node('div');
     const button = node('button', r.display_name);
@@ -220,11 +254,19 @@ function render() {
     identity.append(button, node('small', r.device_id + (r.platform ? ' (' + r.platform + ')' : '')), node('small', typeDesc));
 
     const result = node('div', undefined, 'result');
+    const badgeCls = 'badge ' + (isOutOfBox ? 'out_of_box' : r.connection_status);
+    const badgeText = isOutOfBox ? '📦 Out of Box' : stateLabel(r);
+    const estText = isOutOfBox ? 'Out of Box' : (r.connection_status === 'live' ? r.predicted_floor : '—');
+    const estCls = 'estimate' + (isOutOfBox ? ' out-of-box-val' : '');
+
     result.append(
-      node('span', stateLabel(r), 'badge ' + r.connection_status),
-      node('div', r.connection_status === 'live' ? r.predicted_floor : '—', 'estimate'),
-      node('small', 'Seen ' + r.age_seconds + 's ago')
+      node('span', badgeText, badgeCls),
+      node('div', estText, estCls)
     );
+    if (isOutOfBox) {
+      result.append(node('span', 'Dwell time not recorded', 'no-record-tag'));
+    }
+    result.append(node('small', 'Seen ' + r.age_seconds + 's ago'));
     card.append(identity, result);
     $('#devices').append(card);
   }
@@ -243,10 +285,11 @@ async function renderDetail() {
   if (!selectedDevice) return;
 
   const r = rows.find(r => r.device_id === selectedDevice);
+  const isOutOfBox = r && (r.connection_status === 'out_of_box' || r.predicted_floor === 'Out of Box' || r.is_out_of_box);
   $('#detail-title').textContent = r ? r.display_name : 'Waiting for device';
   $('#detail-id').textContent = selectedDevice;
   $('#detail-result').textContent = r
-    ? (r.connection_status === 'live' ? r.predicted_floor + ' · Estimated floor' : (r.connection_status === 'offline' ? 'No fresh estimate' : r.error))
+    ? (isOutOfBox ? '📦 Out of Box · Outside campus Wi-Fi (Dwell time not recorded)' : (r.connection_status === 'live' ? r.predicted_floor + ' · Estimated floor' : (r.connection_status === 'offline' ? 'No fresh estimate' : r.error)))
     : 'No scans received yet';
 
   if (!r || !serverOk) {

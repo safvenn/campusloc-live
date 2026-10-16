@@ -95,13 +95,13 @@ FLOOR_LABELS = {
 
 def get_active_campus_floor(latest_devices, now):
     active = [row for row in latest_devices.values()
-              if row.get('device_type') != 'web' and (now - row.get('received_at', 0) <= 90) and row.get('predicted_floor')]
+              if row.get('device_type') != 'web' and (now - row.get('received_at', 0) <= 90) and row.get('predicted_floor') and not row.get('is_out_of_box') and row.get('status') != 'cannot_localize' and row.get('predicted_floor') != 'Out of Box']
     if active:
         active.sort(key=lambda r: r.get('received_at', 0), reverse=True)
         return (active[0]['predicted_floor'],
                 active[0].get('detected_access_points', 6),
                 active[0].get('recognized_access_points', 4))
-    return 'Ground', 1, 1
+    return None, 0, 0
 
 
 def public_result(result, connected, now=None):
@@ -109,9 +109,26 @@ def public_result(result, connected, now=None):
     stale = age > 90
     is_web = result.get('device_type') == 'web'
     is_online = (not stale) and (connected or is_web)
-    state = 'offline' if not is_online else ('unlocated' if 'error' in result else 'live')
+    is_oob = bool(result.get('is_out_of_box') or result.get('status') == 'out_of_box' or result.get('predicted_floor') == 'Out of Box')
+
+    if not is_online:
+        state = 'offline'
+    elif is_oob:
+        state = 'out_of_box'
+    elif 'error' in result:
+        state = 'unlocated'
+    else:
+        state = 'live'
+
+    disp_floor = result.get('predicted_floor', 'Out of Box')
+    if state in ('out_of_box', 'unlocated') or is_oob:
+        disp_floor = 'Out of Box'
+
     return {**result, 'stale': stale, 'broker_connected': connected,
+            'is_out_of_box': is_oob or (state in ('out_of_box', 'unlocated')),
+            'predicted_floor': disp_floor,
             'connection_status': state, 'age_seconds': round(age)}
+
 
 
 
@@ -146,11 +163,16 @@ async def lifespan(app):
                 if not app.state.store.add(result):
                     return
             client.publish(f'campusloc/{device}/prediction', json.dumps(result), qos=1, retain=False)
-            if 'predicted_floor' in result:
+            if 'predicted_floor' in result and not result.get('is_out_of_box') and result.get('status') != 'cannot_localize' and result['predicted_floor'] != 'Out of Box':
                 try:
                     db.record_live_heartbeat(device, result['predicted_floor'], user_name=result.get('display_name'))
                 except Exception:
                     LOG.exception('Failed to persist scan to DB')
+            else:
+                try:
+                    db.close_user_session(device)
+                except Exception:
+                    pass
         except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
             LOG.warning('Rejected malformed or stale scan')
         except Exception:
@@ -240,25 +262,49 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
     with app.state.lock:
         prev = app.state.latest.get(device)
         selected_floor = None
+        is_explicit_out_of_box = False
         if payload.selected_floor:
             normalized = payload.selected_floor.strip().lower()
-            if normalized in FLOOR_LABELS:
+            if normalized in ('out of box', 'out_of_box', 'oob'):
+                is_explicit_out_of_box = True
+            elif normalized in FLOOR_LABELS:
                 selected_floor = FLOOR_LABELS[normalized]
 
-        if selected_floor:
+        if is_explicit_out_of_box:
+            floor = None
+            is_out_of_box = True
+            user_selected = 'Out of Box'
+            detected_aps = 0
+            recognized_aps = 0
+        elif selected_floor:
             floor = selected_floor
+            is_out_of_box = False
             user_selected = selected_floor
             detected_aps = 6
             recognized_aps = 4
         elif prev and prev.get('user_selected_floor'):
-            floor = prev['user_selected_floor']
-            user_selected = floor
-            detected_aps = prev.get('detected_access_points', 6)
-            recognized_aps = prev.get('recognized_access_points', 4)
+            if prev['user_selected_floor'] == 'Out of Box':
+                floor = None
+                is_out_of_box = True
+                user_selected = 'Out of Box'
+                detected_aps = 0
+                recognized_aps = 0
+            else:
+                floor = prev['user_selected_floor']
+                is_out_of_box = False
+                user_selected = floor
+                detected_aps = prev.get('detected_access_points', 6)
+                recognized_aps = prev.get('recognized_access_points', 4)
         else:
             campus_floor, detected_aps, recognized_aps = get_active_campus_floor(app.state.latest, now)
-            floor = campus_floor
-            user_selected = None
+            if campus_floor:
+                floor = campus_floor
+                is_out_of_box = False
+                user_selected = None
+            else:
+                floor = None
+                is_out_of_box = True
+                user_selected = None
 
         final_display_name = (user_info['name'] if user_info and user_info.get('name') else name)
 
@@ -274,26 +320,34 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
             'detected_access_points': detected_aps,
             'recognized_access_points': recognized_aps,
             'total_model_access_points': 100,
-            'predicted_floor': floor,
-            'status': 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION',
+            'predicted_floor': floor or 'Out of Box',
+            'is_out_of_box': is_out_of_box,
+            'status': 'out_of_box' if is_out_of_box else 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION',
             'device_type': 'web',
             'user_selected_floor': user_selected,
             'platform': payload.platform or 'browser',
-            'message': 'Web user session · Predicted from local campus environment'
+            'message': 'Out of Box · No matching campus Wi-Fi access points' if is_out_of_box else 'Web user session · Localized from campus Wi-Fi'
         }
         app.state.store.add(result)
 
-        try:
-            db.record_live_heartbeat(
-                device_id=device,
-                floor=floor,
-                user_id=int(user_info['sub']) if user_info and user_info.get('sub') else None,
-                user_name=final_display_name,
-                user_email=user_info.get('email') if user_info else None,
-                now=now
-            )
-        except Exception:
-            LOG.exception('Failed to log heartbeat to DB')
+        # DO NOT RECORD OUT OF BOX DATA
+        if is_out_of_box or not floor or floor == 'Out of Box':
+            try:
+                db.close_user_session(device, now)
+            except Exception:
+                pass
+        else:
+            try:
+                db.record_live_heartbeat(
+                    device_id=device,
+                    floor=floor,
+                    user_id=int(user_info['sub']) if user_info and user_info.get('sub') else None,
+                    user_name=final_display_name,
+                    user_email=user_info.get('email') if user_info else None,
+                    now=now
+                )
+            except Exception:
+                LOG.exception('Failed to log heartbeat to DB')
 
         return public_result(result, app.state.connected, now)
 

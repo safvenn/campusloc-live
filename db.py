@@ -197,9 +197,47 @@ def authenticate_user(email: str, password: str) -> dict | None:
         conn.close()
 
 
-def record_live_heartbeat(device_id: str, floor: str, user_id=None, user_name=None, user_email=None, now=None):
-    """Tracks time spent on a floor continuously."""
+def close_user_session(device_id: str, now=None):
+    """Closes any active floor dwell session when a user goes Out of Box or disconnects."""
     now = time.time() if now is None else now
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        if IS_POSTGRES:
+            cur.execute("""
+                SELECT id, started_at, last_heartbeat FROM floor_sessions
+                WHERE device_id = %s ORDER BY id DESC LIMIT 1
+            """, (device_id,))
+            latest = cur.fetchone()
+            if latest and (now - latest[2]) <= 90:
+                duration = round(now - latest[1], 1)
+                cur.execute("UPDATE floor_sessions SET ended_at = %s, duration_seconds = %s WHERE id = %s",
+                            (now, duration, latest[0]))
+                conn.commit()
+        else:
+            cur.execute("""
+                SELECT id, started_at, last_heartbeat FROM floor_sessions
+                WHERE device_id = ? ORDER BY id DESC LIMIT 1
+            """, (device_id,))
+            latest = cur.fetchone()
+            if latest and (now - latest['last_heartbeat']) <= 90:
+                duration = round(now - latest['started_at'], 1)
+                cur.execute("UPDATE floor_sessions SET ended_at = ?, duration_seconds = ? WHERE id = ?",
+                            (now, duration, latest['id']))
+                conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def record_live_heartbeat(device_id: str, floor: str, user_id=None, user_name=None, user_email=None, now=None):
+    """Tracks time spent on a floor continuously. Does NOT record Out of Box data."""
+    now = time.time() if now is None else now
+    # DO NOT RECORD OUT OF BOX DATA
+    if not floor or str(floor).strip().lower() in ('out of box', 'out_of_box', 'cannot_localize', 'unlocated', 'none', '—'):
+        close_user_session(device_id, now)
+        return
+
     conn = get_connection()
     cur = conn.cursor()
     try:
