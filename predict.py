@@ -12,7 +12,9 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / 'outputs' / 'wifi_floor_experimental.pkl'
+DEFAULT_MODEL = Path(__file__).resolve().parent / 'model.pkl'
+if not DEFAULT_MODEL.exists():
+    DEFAULT_MODEL = Path(__file__).resolve().parent / 'outputs' / 'wifi_floor_experimental.pkl'
 
 
 def read_latest_network_survey(path: str):

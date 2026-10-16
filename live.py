@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import db
 from predict import DEFAULT_MODEL, predict_signals
+from wifi_scanner import scan_and_predict, scan_wifi_networks
 
 LOG = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
@@ -135,10 +136,46 @@ def public_result(result, connected, now=None):
 @asynccontextmanager
 async def lifespan(app):
     bundle = joblib.load(DEFAULT_MODEL)
+    app.state.bundle = bundle
     app.state.store = DeviceStore()
     app.state.latest = app.state.store.latest
     app.state.lock = threading.Lock()
     app.state.connected = False
+
+    # Automatic background host Wi-Fi scanner to predict real floor using model.pkl
+    stop_scanner = threading.Event()
+
+    def host_scanner_loop():
+        time.sleep(1.0)
+        while not stop_scanner.is_set():
+            try:
+                res = scan_and_predict(bundle)
+                if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
+                    now = time.time()
+                    scanner_result = {
+                        'device_id': 'campus-host-scanner',
+                        'display_name': 'Campus Scanner (Host Wi-Fi)',
+                        'scan_id': f'host-{int(now * 1000)}',
+                        'captured_at': now,
+                        'received_at': now,
+                        'detected_access_points': res.get('detected_access_points', 0),
+                        'recognized_access_points': res.get('recognized_access_points', 0),
+                        'total_model_access_points': 100,
+                        'predicted_floor': res['predicted_floor'],
+                        'status': res.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
+                        'device_type': 'scanner',
+                        'scores': res.get('uncalibrated_model_scores', {}),
+                        'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched)"
+                    }
+                    with app.state.lock:
+                        app.state.store.add(scanner_result)
+            except Exception as e:
+                LOG.debug('Host Wi-Fi background scan: %s', e)
+            stop_scanner.wait(15)
+
+    scanner_thread = threading.Thread(target=host_scanner_loop, daemon=True)
+    scanner_thread.start()
+
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='campusloc-receiver')
     if os.getenv('MQTT_USERNAME'):
         client.username_pw_set(os.environ['MQTT_USERNAME'], os.getenv('MQTT_PASSWORD'))
@@ -186,6 +223,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        stop_scanner.set()
         client.disconnect()
         client.loop_stop()
 
@@ -197,6 +235,50 @@ app.mount('/assets', StaticFiles(directory=ROOT / 'web'), name='assets')
 @app.get('/')
 def dashboard():
     return FileResponse(ROOT / 'web' / 'index.html')
+
+
+@app.post('/api/scan/live')
+def scan_live():
+    """Trigger an immediate real-time Wi-Fi scan on the host and predict floor with model.pkl."""
+    res = scan_and_predict(app.state.bundle)
+    if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
+        now = time.time()
+        scanner_result = {
+            'device_id': 'campus-host-scanner',
+            'display_name': 'Campus Scanner (Host Wi-Fi)',
+            'scan_id': f'host-{int(now * 1000)}',
+            'captured_at': now,
+            'received_at': now,
+            'detected_access_points': res.get('detected_access_points', 0),
+            'recognized_access_points': res.get('recognized_access_points', 0),
+            'total_model_access_points': 100,
+            'predicted_floor': res['predicted_floor'],
+            'status': res.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
+            'device_type': 'scanner',
+            'scores': res.get('uncalibrated_model_scores', {}),
+            'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched)"
+        }
+        with app.state.lock:
+            app.state.store.add(scanner_result)
+    return res
+
+
+class CustomScanPayload(BaseModel):
+    signals: dict[str, float]
+
+
+@app.post('/api/predict/custom')
+def predict_custom(payload: CustomScanPayload):
+    """Predict floor for custom BSSID readings using model.pkl."""
+    try:
+        prediction = predict_signals(app.state.bundle, payload.signals, min_known=1)
+        floor = prediction['predicted_floor']
+        floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
+        prediction['predicted_floor'] = floor_map.get(floor.lower(), floor.capitalize())
+        prediction['success'] = True
+        return prediction
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get('/api/latest/{device}')
@@ -263,9 +345,13 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
         prev = app.state.latest.get(device)
         selected_floor = None
         is_explicit_out_of_box = False
+        is_auto_detect = False
         if payload.selected_floor:
             normalized = payload.selected_floor.strip().lower()
-            if normalized in ('out of box', 'out_of_box', 'oob'):
+            if normalized in ('auto', 'predict', 'model', 'reset'):
+                is_auto_detect = True
+                user_selected = None
+            elif normalized in ('out of box', 'out_of_box', 'oob'):
                 is_explicit_out_of_box = True
             elif normalized in FLOOR_LABELS:
                 selected_floor = FLOOR_LABELS[normalized]
@@ -276,13 +362,13 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
             user_selected = 'Out of Box'
             detected_aps = 0
             recognized_aps = 0
-        elif selected_floor:
+        elif selected_floor and not is_auto_detect:
             floor = selected_floor
             is_out_of_box = False
             user_selected = selected_floor
             detected_aps = 6
             recognized_aps = 4
-        elif prev and prev.get('user_selected_floor'):
+        elif prev and prev.get('user_selected_floor') and not is_auto_detect:
             if prev['user_selected_floor'] == 'Out of Box':
                 floor = None
                 is_out_of_box = True
@@ -297,6 +383,16 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
                 recognized_aps = prev.get('recognized_access_points', 4)
         else:
             campus_floor, detected_aps, recognized_aps = get_active_campus_floor(app.state.latest, now)
+            if not campus_floor:
+                try:
+                    res = scan_and_predict(app.state.bundle)
+                    if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
+                        campus_floor = res['predicted_floor']
+                        detected_aps = res.get('detected_access_points', 0)
+                        recognized_aps = res.get('recognized_access_points', 0)
+                except Exception:
+                    pass
+
             if campus_floor:
                 floor = campus_floor
                 is_out_of_box = False

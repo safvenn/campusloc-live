@@ -32,6 +32,7 @@
       <p>Real-time Wi-Fi floor estimates and dwell-time intelligence.</p>
     </div>
     <div class="heading-buttons">
+      <button id="header-scan-btn" class="model-predict-btn" title="Scan local Wi-Fi and predict floor using model.pkl">⚡ Scan Wi-Fi & Predict Floor</button>
       <button id="admin-quick-btn" class="secondary" title="View floor dwell analytics">📊 Admin Analytics</button>
       <button id="join">+ Connect a device</button>
     </div>
@@ -109,6 +110,12 @@
           <button id="edit-my-name-btn" class="mini-btn" type="button" title="Change nickname">✎ Rename</button>
         </div>
         <p class="presence-id-text">ID: <code id="my-device-id">...</code> · <span id="my-source-note">Campus Wi-Fi synched</span></p>
+        <div class="presence-actions-row">
+          <button id="auto-detect-btn" class="auto-scan-btn" type="button" title="Scan local Wi-Fi and predict floor using model.pkl">
+            <span>⚡</span> Predict Floor with model.pkl
+          </button>
+          <span id="model-score-badge" class="model-score-pill" hidden>🎯 Model match: Fourth (98.9%)</span>
+        </div>
       </div>
       <div class="presence-floor-box">
         <div class="presence-floor-label">YOUR PREDICTED FLOOR</div>
@@ -120,6 +127,7 @@
       </div>
     </div>
   </section>
+  <div id="toast" class="toast-box" role="alert"></div>
 
   <!-- Live Stats -->
   <section class="stats" aria-label="Tracking summary">
