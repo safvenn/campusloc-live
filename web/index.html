@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CampusLoc · Live Campus & Floor Intelligence</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+<header>
+  <div class="brand-group">
+    <a class="brand" href="/">◈ CampusLoc <span>LIVE CAMPUS</span></a>
+    <div id="connection" role="status">Connecting…</div>
+  </div>
+  <div class="header-actions">
+    <button id="open-auth-btn" class="secondary mini-btn">🔑 Sign In / Register</button>
+    <div id="user-badge-container" class="user-pill" hidden>
+      <span class="user-avatar">👤</span>
+      <span id="user-profile-name">Guest</span>
+      <span id="user-role-badge" class="badge">user</span>
+      <button id="admin-toggle-btn" class="admin-tab-btn" hidden>📊 Admin Analytics</button>
+      <button id="logout-btn" class="logout-btn" title="Sign out">Log out</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="heading">
+    <div>
+      <p class="eyebrow">CAMPUS OVERVIEW</p>
+      <h1>Everyone in view.</h1>
+      <p>Real-time Wi-Fi floor estimates and dwell-time intelligence.</p>
+    </div>
+    <div class="heading-buttons">
+      <button id="admin-quick-btn" class="secondary" title="View floor dwell analytics">📊 Admin Analytics</button>
+      <button id="join">+ Connect a device</button>
+    </div>
+  </div>
+
+  <div class="notice">Experimental model · Floor estimates may be incorrect. Live analytics are recorded in real-time.</div>
+
+  <!-- Admin Analytics Panel (Toggled for Admins) -->
+  <section class="panel admin-panel" id="admin-dashboard" hidden>
+    <div class="section-title">
+      <div>
+        <span class="admin-tag">⚡ ADMINISTRATOR INTELLIGENCE</span>
+        <h2>Floor Dwell Time & User Analytics</h2>
+        <p class="admin-subtitle">Live database records of how much time users spend on each campus floor.</p>
+      </div>
+      <button id="close-admin-btn" class="secondary">Close</button>
+    </div>
+
+    <!-- Analytics KPI Cards -->
+    <div class="admin-stats-grid">
+      <div class="admin-stat-card">
+        <span>Total Dwell Monitored</span>
+        <strong id="admin-total-time">0 min</strong>
+      </div>
+      <div class="admin-stat-card">
+        <span>Most Visited Floor</span>
+        <strong id="admin-top-floor">—</strong>
+      </div>
+      <div class="admin-stat-card">
+        <span>Tracked User Sessions</span>
+        <strong id="admin-total-sessions">0</strong>
+      </div>
+    </div>
+
+    <!-- Floor Dwell Time Breakdown -->
+    <div class="admin-section-header">
+      <h3>Time Spent Per Floor</h3>
+      <span id="admin-updated-time">Live Sync</span>
+    </div>
+    <div class="floor-dwell-grid" id="admin-floor-dwell-list"></div>
+
+    <!-- User Dwell Details Table -->
+    <div class="admin-section-header" style="margin-top:28px;">
+      <h3>User Floor Dwell Records</h3>
+      <input id="admin-user-filter" class="table-search" placeholder="Filter by user or floor…">
+    </div>
+    <div class="table-responsive">
+      <table class="analytics-table">
+        <thead>
+          <tr>
+            <th>User / Device</th>
+            <th>Account Email</th>
+            <th>Floor</th>
+            <th>Total Time Spent</th>
+            <th>Last Active</th>
+          </tr>
+        </thead>
+        <tbody id="admin-user-table-body">
+          <tr><td colspan="5" class="empty">Loading analytics…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Personal Live Presence Card -->
+  <section class="presence-card" id="my-presence" aria-label="Your live presence">
+    <div class="presence-main">
+      <div class="presence-info">
+        <div class="presence-status-row">
+          <span class="presence-dot"></span>
+          <span class="presence-tag">LIVE CAMPUS VISITOR</span>
+        </div>
+        <div class="presence-user-row">
+          <h2 id="my-display-name">Web Visitor</h2>
+          <button id="edit-my-name-btn" class="mini-btn" type="button" title="Change nickname">✎ Rename</button>
+        </div>
+        <p class="presence-id-text">ID: <code id="my-device-id">...</code> · <span id="my-source-note">Campus Wi-Fi synched</span></p>
+      </div>
+      <div class="presence-floor-box">
+        <div class="presence-floor-label">YOUR PREDICTED FLOOR</div>
+        <div class="presence-floor-value" id="my-predicted-floor">Ground</div>
+        <div class="presence-picker-row">
+          <span class="presence-picker-label">Switch floor:</span>
+          <div class="floor-chips" id="my-floor-picker"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Live Stats -->
+  <section class="stats" aria-label="Tracking summary">
+    <article><span>Participating users & devices</span><strong id="total">0</strong></article>
+    <article><span>Live floor estimates</span><strong id="live">0</strong></article>
+    <article><span>Unable to locate</span><strong id="unknown">0</strong></article>
+    <article><span>Offline / stale</span><strong id="offline">0</strong></article>
+  </section>
+
+  <!-- Workspace: Building Overview & Live Roster -->
+  <div class="workspace">
+    <section class="building panel">
+      <p class="eyebrow">FLOOR OVERVIEW</p>
+      <h2>Across the building</h2>
+      <p>Live estimates only</p>
+      <div id="floors"></div>
+      <button class="secondary" id="all">Show all floors</button>
+    </section>
+
+    <section class="panel roster">
+      <div class="section-title">
+        <h2>Participating users & devices</h2>
+        <span id="updated"></span>
+      </div>
+      <div class="filters">
+        <label>Search name or ID<input id="search" placeholder="Find a user or device…"></label>
+        <label>Status
+          <select id="state">
+            <option value="all">All statuses</option>
+            <option value="live">Live</option>
+            <option value="unlocated">Unable to locate</option>
+            <option value="offline">Offline / stale</option>
+          </select>
+        </label>
+      </div>
+      <p id="filter-note"></p>
+      <div id="devices"></div>
+    </section>
+  </div>
+
+  <!-- Device Detail Drawer -->
+  <section class="panel" id="detail" hidden>
+    <div class="section-title">
+      <h2 id="detail-title"></h2>
+      <button id="close-detail" class="secondary">Close</button>
+    </div>
+    <p id="detail-id"></p>
+    <div id="detail-result"></div>
+    <h3>Recent estimates</h3>
+    <p>Latest 60 scans in this server session. These are estimates, not a confirmed movement history.</p>
+    <div id="history"></div>
+  </section>
+
+  <footer>
+    Updates every 3 seconds · Dwell times and session logs saved to Database · History resets on broker disconnect.
+  </footer>
+</main>
+
+<!-- Device Connection Dialog -->
+<dialog id="setup">
+  <div class="section-title">
+    <h2>Connect a device</h2>
+    <button class="secondary" id="close-setup">Close</button>
+  </div>
+  <ol>
+    <li>Connect the phone to your laptop hotspot or the same Wi-Fi network.</li>
+    <li><a href="/download/android">Download the Android APK</a> on the phone and install it.</li>
+    <li>Enter a display name and the broker address below in CampusLoc.</li>
+    <li>Enable Wi-Fi and Location, grant precise location permission, and tap Start tracking. Keep the app open.</li>
+  </ol>
+  <label>Broker address<input id="broker-address" readonly></label>
+  <p>If this page is opened as localhost, replace it with your laptop’s hotspot/LAN IP. A hotspot does not identify floors by itself.</p>
+</dialog>
+
+<!-- Rename Nickname Dialog -->
+<dialog id="rename-dialog">
+  <div class="section-title">
+    <h2>Set your nickname</h2>
+    <button class="secondary" id="close-rename" type="button">Close</button>
+  </div>
+  <form id="rename-form">
+    <label>Display Nickname
+      <input id="rename-input" maxlength="40" required placeholder="e.g. My Phone or Alex">
+    </label>
+    <button type="submit" style="margin-top:16px;">Save Nickname</button>
+  </form>
+</dialog>
+
+<!-- User Auth Dialog (Login / Register) -->
+<dialog id="auth-dialog">
+  <div class="section-title">
+    <h2 id="auth-dialog-title">Sign In to CampusLoc</h2>
+    <button class="secondary" id="close-auth-dialog" type="button">Close</button>
+  </div>
+  
+  <div class="auth-tabs">
+    <button id="tab-login" class="auth-tab active" type="button">Sign In</button>
+    <button id="tab-register" class="auth-tab" type="button">Create Account</button>
+  </div>
+
+  <form id="auth-form">
+    <div id="auth-name-group" hidden>
+      <label>Full Name
+        <input id="auth-name" placeholder="Sarah Connor">
+      </label>
+    </div>
+    <label>Email Address
+      <input id="auth-email" type="email" required placeholder="user@campus.edu">
+    </label>
+    <label>Password
+      <input id="auth-password" type="password" required minlength="6" placeholder="••••••••">
+    </label>
+    <p id="auth-error" class="auth-error-msg" hidden></p>
+    <button id="auth-submit-btn" type="submit" style="width:100%;margin-top:16px;">Sign In</button>
+  </form>
+
+  <div class="auth-demo-box">
+    <span>Quick Demo Login:</span>
+    <button id="demo-admin-btn" type="button" class="mini-btn">⚡ Sign in as Admin</button>
+  </div>
+</dialog>
+
+<script src="/assets/dashboard.js"></script>
+</body>
+</html>

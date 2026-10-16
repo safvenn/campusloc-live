@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: campusloc-backend
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements-live.txt
+    startCommand: uvicorn live:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: campusloc-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MQTT_HOST
+        value: localhost
+      - key: MQTT_PORT
+        value: "1883"

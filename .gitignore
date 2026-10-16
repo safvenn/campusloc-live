@@ -1,0 +1,8 @@
+.venv/
+.build-tools/
+.runtime/
+__pycache__/
+*.pyc
+campusloc.db
+*.db
+

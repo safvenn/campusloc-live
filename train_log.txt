@@ -1,0 +1,94 @@
+DATA AUDIT: {
+  "rows": 693,
+  "bssid_features": 100,
+  "unique_fingerprints": 259,
+  "ambiguous_fingerprints": 137,
+  "rows_with_ambiguous_fingerprints": 568,
+  "best_possible_in_sample_accuracy_for_deterministic_mapping": 0.378066,
+  "floor_counts": {
+    "ground": 198,
+    "fourth": 138,
+    "third": 128,
+    "second": 117,
+    "first": 83,
+    "B1": 29
+  },
+  "removed_non_wifi_columns": [
+    "Unnamed: 0"
+  ],
+  "note": "Conflicting floor labels cannot be repaired from this pivoted file. Verify original survey recordings before production use."
+}
+CV SCORES: {
+  "majority_baseline": {
+    "cv_macro_f1_mean": 0.07418504477328007,
+    "cv_macro_f1_folds": [
+      0.0751,
+      0.0739,
+      0.0736
+    ],
+    "cv_accuracy_mean": 0.28627279652283016
+  },
+  "knn_3": {
+    "cv_macro_f1_mean": 0.22263199187472216,
+    "cv_macro_f1_folds": [
+      0.2241,
+      0.2206,
+      0.2232
+    ],
+    "cv_accuracy_mean": 0.2882107810189542
+  },
+  "knn_7": {
+    "cv_macro_f1_mean": 0.23596939443214213,
+    "cv_macro_f1_folds": [
+      0.2607,
+      0.2512,
+      0.196
+    ],
+    "cv_accuracy_mean": 0.3366043823094502
+  },
+  "logistic_balanced": {
+    "cv_macro_f1_mean": 0.31645101578736273,
+    "cv_macro_f1_folds": [
+      0.3302,
+      0.2966,
+      0.3226
+    ],
+    "cv_accuracy_mean": 0.35977057848277094
+  },
+  "rbf_svm_balanced": {
+    "cv_macro_f1_mean": 0.28255295647980255,
+    "cv_macro_f1_folds": [
+      0.2671,
+      0.2767,
+      0.3038
+    ],
+    "cv_accuracy_mean": 0.3229712775014563
+  },
+  "random_forest": {
+    "cv_macro_f1_mean": 0.27907553450719746,
+    "cv_macro_f1_folds": [
+      0.3008,
+      0.263,
+      0.2734
+    ],
+    "cv_accuracy_mean": 0.34044674463413543
+  },
+  "extra_trees": {
+    "cv_macro_f1_mean": 0.2666665633083203,
+    "cv_macro_f1_folds": [
+      0.2916,
+      0.2536,
+      0.2548
+    ],
+    "cv_accuracy_mean": 0.3327172110946812
+  }
+}
+SELECTED MODEL: logistic_balanced
+GROUPED HOLDOUT: {
+  "train_rows": 517,
+  "test_rows": 176,
+  "accuracy": 0.35795454545454547,
+  "macro_f1": 0.3110077519379845,
+  "balanced_accuracy": 0.4142857142857143
+}
+MODEL FILE: /mnt/data/campusloc_model/outputs/wifi_floor_experimental.pkl
