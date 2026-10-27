@@ -22,6 +22,10 @@ public class MainActivity extends Activity {
     private MqttAsyncClient client;
     private EditText broker, username, password, displayName;
     private String activeName;
+    private boolean httpMode;
+    private String serverUrl, accessToken, serverDeviceId;
+    private int generation;
+    private final java.util.concurrent.ExecutorService network = java.util.concurrent.Executors.newSingleThreadExecutor();
     private TextView status, floor, details, networks;
     private TextView freshness, accessPoints, connectionStatus;
     private LinearLayout dashboardPanel, settingsPanel;
@@ -65,7 +69,7 @@ public class MainActivity extends Activity {
         start = new Button(this); start.setText("Start tracking"); layout.addView(start);
         start.setOnClickListener(v -> { if (running) stop(); else begin(); });
         connectionStatus = label(layout, "○ Not connected", 14);
-        status = label(layout, "Ready. Configure your broker in Connection setup, then start.", 14);
+        status = label(layout, "Sign in to your hosted server in Connection setup, then start.", 14);
         dashboardPanel = new LinearLayout(this); dashboardPanel.setOrientation(LinearLayout.VERTICAL); layout.addView(dashboardPanel);
         LinearLayout locationCard = card(dashboardPanel);
         label(locationCard, "YOUR ESTIMATED FLOOR", 12);
@@ -90,19 +94,19 @@ public class MainActivity extends Activity {
         displayName = input(settingsPanel, "Your display name or nickname", false);
         displayName.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(40)});
         displayName.setText(prefs.getString("name", "Phone " + deviceId.substring(0, 4)));
-        broker = input(settingsPanel, "Broker URI: tcp://192.168.1.10:1883", false);
-        broker.setText(prefs.getString("broker", "tcp://192.168.1.10:1883"));
-        username = input(settingsPanel, "MQTT username (optional)", false);
-        password = input(settingsPanel, "MQTT password (not saved)", true);
+        broker = input(settingsPanel, "Server URL: https://campusloc-live.onrender.com", false);
+        broker.setText(prefs.getString("server_url", "https://campusloc-live.onrender.com"));
+        username = input(settingsPanel, "Account email (register on the website)", false);
+        password = input(settingsPanel, "Account password (not saved)", true);
         label(settingsPanel, "Changes apply the next time you start tracking. Enable Wi-Fi and Location on your phone.", 14);
         label(settingsPanel, "Device ID: " + deviceId, 12);
         Button copy = new Button(this); copy.setText("Copy device ID"); settingsPanel.addView(copy);
-        copy.setOnClickListener(v -> { ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("CampusLoc device", deviceId)); Toast.makeText(this, "Device ID copied", Toast.LENGTH_SHORT).show(); });
+        copy.setOnClickListener(v -> { ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("CampusLoc device", serverDeviceId == null ? deviceId : serverDeviceId)); Toast.makeText(this, "Device ID copied", Toast.LENGTH_SHORT).show(); });
         Button dashboard = new Button(this); dashboard.setText("Open shared website (stops scanning)"); settingsPanel.addView(dashboard);
         dashboard.setOnClickListener(v -> {
             try { String host = java.net.URI.create(broker.getText().toString().trim()).getHost();
                 if (host == null) throw new IllegalArgumentException();
-                startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("http://" + host + ":8000/?device=" + deviceId)));
+                startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse((broker.getText().toString().startsWith("http") ? broker.getText().toString().replaceAll("/+$", "") : "http://" + host + ":8000") + "/?device=" + (serverDeviceId == null ? deviceId : serverDeviceId))));
             } catch (Exception e) { status.setText("Enter a valid broker address first."); }
         });
         label(layout, "Starting tracking shares your nickname and floor estimates with viewers of your server. Stop tracking to stop sending new scans.", 13);
@@ -138,7 +142,11 @@ public class MainActivity extends Activity {
             activeName = displayName.getText().toString().trim();
             if (activeName.isEmpty()) throw new IllegalArgumentException("Enter a display name");
             String uri = broker.getText().toString().trim();
-            if (!(uri.startsWith("tcp://") || uri.startsWith("ssl://"))) throw new IllegalArgumentException("Use tcp:// or ssl:// broker URI");
+            if (uri.startsWith("https://") || uri.startsWith("http://")) {
+                beginHttp(uri); return;
+            }
+            httpMode = false;
+            if (!(uri.startsWith("tcp://") || uri.startsWith("ssl://"))) throw new IllegalArgumentException("Use an HTTPS server URL (or tcp:// for legacy MQTT)");
             getSharedPreferences("campusloc", MODE_PRIVATE).edit().putString("broker", uri).putString("name", activeName).apply();
             final MqttAsyncClient connection = new MqttAsyncClient(uri, "campusloc-" + deviceId, new MemoryPersistence()); client = connection;
             running = true; start.setText("Stop tracking"); status.setText("Connecting to broker…");
@@ -156,15 +164,7 @@ public class MainActivity extends Activity {
                     JSONObject result = new JSONObject(new String(message.getPayload(), StandardCharsets.UTF_8));
                     runOnUiThread(() -> {
                         if (!running || client != connection || !result.optString("scan_id").equals(latestScan)) return;
-                        String estimate = result.optString("predicted_floor", "");
-                        if (result.has("error") || !floorRows.containsKey(estimate)) { clearLocation(result.optString("error", "No supported floor estimate received.")); return; }
-                        double age = System.currentTimeMillis()/1000.0 - result.optDouble("captured_at", 0);
-                        if (!Double.isFinite(age) || age > 90 || age < -30) { clearLocation("Received an expired estimate. Waiting for a fresh scan."); return; }
-                        floor.setText(estimate); highlightFloor(estimate);
-                        details.setText("You may be on " + estimate + ". Experimental estimate.");
-                        lastEstimateAt = SystemClock.elapsedRealtime(); freshness.setText("Updated just now");
-                        accessPoints.setText(result.optInt("recognized_access_points") + " recognized / " + result.optInt("detected_access_points") + " detected access points");
-                        handler.removeCallbacks(stale); handler.postDelayed(stale, 90000);
+                        displayPrediction(result);
                     });
                 }
             });
@@ -178,7 +178,7 @@ public class MainActivity extends Activity {
     }
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) { super.onRequestPermissionsResult(request, permissions, results); if (request == 7 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) begin(); else status.setText("Precise location permission is required for Wi-Fi scans."); }
     private void scan() {
-        if (!running || client == null || !client.isConnected()) return;
+        if (!running || (!httpMode && (client == null || !client.isConnected()))) return;
         try { requestedAt = SystemClock.elapsedRealtime(); waiting = wifi.startScan(); status.setText(waiting ? "Scanning nearby Wi-Fi…" : "Scan unavailable. Check Wi-Fi / Location; Android may throttle scans."); if (waiting) handler.postDelayed(timeout, 15000); }
         catch (SecurityException e) { stop(); status.setText("Location permission is missing. Grant precise location and restart."); }
     }
@@ -195,16 +195,77 @@ public class MainActivity extends Activity {
             if (signals.length() == 0) { status.setText("Empty scan; no data sent."); return; }
             latestScan = UUID.randomUUID().toString();
             JSONObject payload = new JSONObject().put("device_id", deviceId).put("display_name", activeName).put("scan_id", latestScan).put("captured_at", System.currentTimeMillis()/1000.0).put("signals", signals);
+            if (httpMode) { uploadHttp(payload); return; }
             client.publish("campusloc/" + deviceId + "/scan", payload.toString().getBytes(StandardCharsets.UTF_8), 1, false);
             status.setText("Sent " + signals.length() + " access points. Waiting for estimate…");
         } catch (Exception e) { status.setText("Scan delivery failed: " + e.getMessage()); }
     }
+
+    private JSONObject requestJson(String url, JSONObject body, String token) throws Exception {
+        java.net.HttpURLConnection conn = (java.net.HttpURLConnection)new java.net.URL(url).openConnection();
+        conn.setConnectTimeout(15000); conn.setReadTimeout(60000); conn.setInstanceFollowRedirects(false);
+        conn.setRequestMethod("POST"); conn.setDoOutput(true); conn.setRequestProperty("Content-Type", "application/json");
+        if (token != null) conn.setRequestProperty("Authorization", "Bearer " + token);
+        try {
+            try (java.io.OutputStream out = conn.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
+            int code = conn.getResponseCode();
+            java.io.InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            if (stream == null) throw new Exception("Server returned HTTP " + code);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            try (java.io.InputStream in = stream) { byte[] buffer = new byte[4096]; int n; while ((n=in.read(buffer))!=-1) { bytes.write(buffer,0,n); if (bytes.size()>131072) throw new Exception("Response too large"); } }
+            JSONObject response = new JSONObject(bytes.toString("UTF-8"));
+            if (code < 200 || code >= 300) throw new Exception("HTTP " + code + ": " + response.optString("detail", "Request failed"));
+            return response;
+        } finally { conn.disconnect(); }
+    }
+    private void beginHttp(String uri) throws Exception {
+        java.net.URI parsed = new java.net.URI(uri);
+        if (parsed.getHost() == null || parsed.getUserInfo() != null || parsed.getQuery() != null || parsed.getFragment() != null) throw new IllegalArgumentException("Enter a server base URL");
+        if (uri.startsWith("http://")) {
+            String host = parsed.getHost();
+            if (!(host.equals("localhost") || host.startsWith("192.168.") || host.startsWith("10.") || host.equals("127.0.0.1"))) throw new IllegalArgumentException("Use HTTPS for remote servers");
+        }
+        if (username.getText().toString().trim().isEmpty() || password.getText().toString().isEmpty()) throw new IllegalArgumentException("Enter your website account email and password");
+        serverUrl = uri.replaceAll("/+$", ""); httpMode = true; running = true;
+        final int session = ++generation; final String endpoint = serverUrl;
+        JSONObject login = new JSONObject().put("email",username.getText().toString().trim()).put("password",password.getText().toString());
+        getSharedPreferences("campusloc",MODE_PRIVATE).edit().putString("server_url",serverUrl).putString("name",activeName).apply();
+        start.setText("Stop tracking"); connectionStatus.setText("Signing in to server…"); status.setText("Hosted servers may take a moment to wake up."); showDashboard(true);
+        network.execute(() -> {
+            try {
+                JSONObject response = requestJson(endpoint + "/api/auth/login", login, null);
+                String token = response.getString("token");
+                runOnUiThread(() -> { if (running && generation == session) { accessToken=token; connectionStatus.setText("● Signed in · Direct HTTPS scans"); handler.post(ageTick); handler.post(loop); } });
+            } catch(Exception e) { runOnUiThread(() -> { if (generation == session) { stop(); status.setText("Sign-in failed: " + e.getMessage()); showDashboard(false); } }); }
+        });
+    }
+    private void uploadHttp(JSONObject payload) {
+        final int session = generation; final String token = accessToken, endpoint = serverUrl;
+        status.setText("Uploading your Wi-Fi scan…");
+        network.execute(() -> {
+            try {
+                JSONObject result = requestJson(endpoint + "/api/scan/report",payload,token);
+                runOnUiThread(() -> { if (running && generation == session && result.optString("scan_id").equals(latestScan)) { serverDeviceId=result.optString("device_id",deviceId); connectionStatus.setText("● Server connected · Own device readings"); displayPrediction(result); status.setText("Scan uploaded. Next scan in about 35 seconds."); } });
+            } catch(Exception e) { runOnUiThread(() -> { if (running && generation == session) { clearLocation("Cannot reach your server or session expired."); connectionStatus.setText("○ Upload failed"); status.setText(e.getMessage() + " · Check URL/account and restart if needed."); } }); }
+        });
+    }
+    private void displayPrediction(JSONObject result) {
+        String estimate = result.optString("predicted_floor", "");
+        handler.removeCallbacks(stale);
+        if (result.has("error") || !floorRows.containsKey(estimate)) { clearLocation(result.optString("error", "No supported floor estimate.")); return; }
+        double age = System.currentTimeMillis()/1000.0-result.optDouble("captured_at",0);
+        if (!Double.isFinite(age) || age>90 || age< -30) { clearLocation("Estimate expired. Waiting for a fresh scan."); return; }
+        floor.setText(estimate); highlightFloor(estimate); details.setText("You may be on " + estimate + ". Experimental estimate.");
+        lastEstimateAt=SystemClock.elapsedRealtime()-(long)(Math.max(0,age)*1000); freshness.setText("Updated just now");
+        accessPoints.setText(result.optInt("recognized_access_points")+" recognized / "+result.optInt("detected_access_points")+" detected access points");
+        handler.postDelayed(stale,(long)((90-Math.max(0,age))*1000));
+    }
     private void show(String text) { runOnUiThread(() -> { if (running) status.setText(text); }); }
     private void stop() {
-        running = false; waiting = false; handler.removeCallbacksAndMessages(null); start.setText("Start tracking"); status.setText("Tracking stopped"); connectionStatus.setText("○ Not connected"); clearLocation("Tracking stopped. Start to update your location.");
+        generation++; accessToken = null; running = false; waiting = false; handler.removeCallbacksAndMessages(null); start.setText("Start tracking"); status.setText("Tracking stopped"); connectionStatus.setText("○ Not connected"); clearLocation("Tracking stopped. Start to update your location.");
         MqttAsyncClient old = client; client = null;
         if (old != null) new Thread(() -> { try { old.disconnectForcibly(); old.close(); } catch (Exception ignored) {} }).start();
     }
     @Override protected void onStop() { super.onStop(); stop(); }
-    @Override protected void onDestroy() { unregisterReceiver(receiver); super.onDestroy(); }
+    @Override protected void onDestroy() { unregisterReceiver(receiver); network.shutdownNow(); super.onDestroy(); }
 }

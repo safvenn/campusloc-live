@@ -17,3 +17,13 @@ services:
         value: localhost
       - key: MQTT_PORT
         value: "1883"
+      - key: ENABLE_MQTT
+        value: "0"
+      - key: ENABLE_HOST_SCANNER
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+databases:
+  - name: campusloc-db
+    plan: free
+    region: singapore

@@ -1,5 +1,7 @@
 # CampusLoc — Live Campus Indoor Positioning & Floor Dwell Intelligence
 
+**Cloud update (Android 1.3):** Read [CLOUD_SETUP.md](CLOUD_SETUP.md) for direct HTTPS uploads without localhost, a hotspot or MQTT. Each phone submits its own readings after sign-in. Browser visits never borrow the host's location. Earlier shared-floor behavior and deployment claims below are superseded by this guide; deployment must be verified separately.
+
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![JWT Auth](https://img.shields.io/badge/JWT-Protected-black?logo=jsonwebtokens)](https://jwt.io)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Render_Cloud-336791?logo=postgresql&logoColor=white)](https://render.com)

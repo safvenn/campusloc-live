@@ -15,7 +15,7 @@ import paho.mqtt.client as mqtt
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictFloat
 import db
 from predict import DEFAULT_MODEL, predict_signals
 from wifi_scanner import scan_and_predict, scan_wifi_networks
@@ -94,39 +94,28 @@ FLOOR_LABELS = {
 }
 
 
-def get_active_campus_floor(latest_devices, now):
-    active = [row for row in latest_devices.values()
-              if row.get('device_type') != 'web' and (now - row.get('received_at', 0) <= 90) and row.get('predicted_floor') and not row.get('is_out_of_box') and row.get('status') != 'cannot_localize' and row.get('predicted_floor') != 'Out of Box']
-    if active:
-        active.sort(key=lambda r: r.get('received_at', 0), reverse=True)
-        return (active[0]['predicted_floor'],
-                active[0].get('detected_access_points', 6),
-                active[0].get('recognized_access_points', 4))
-    return None, 0, 0
-
-
 def public_result(result, connected, now=None):
     age = max(0, (time.time() if now is None else now) - result['received_at'])
     stale = age > 90
     is_web = result.get('device_type') == 'web'
-    is_online = (not stale) and (connected or is_web)
+    is_online = (not stale) and (connected or is_web or result.get('transport') == 'https' or result.get('device_type') == 'scanner')
     is_oob = bool(result.get('is_out_of_box') or result.get('status') == 'out_of_box' or result.get('predicted_floor') == 'Out of Box')
 
     if not is_online:
         state = 'offline'
     elif is_oob:
         state = 'out_of_box'
-    elif 'error' in result:
+    elif 'error' in result or not result.get('predicted_floor'):
         state = 'unlocated'
     else:
         state = 'live'
 
-    disp_floor = result.get('predicted_floor', 'Out of Box')
+    disp_floor = result.get('predicted_floor')
     if state in ('out_of_box', 'unlocated') or is_oob:
-        disp_floor = 'Out of Box'
+        disp_floor = None
 
     return {**result, 'stale': stale, 'broker_connected': connected,
-            'is_out_of_box': is_oob or (state in ('out_of_box', 'unlocated')),
+            'is_out_of_box': is_oob,
             'predicted_floor': disp_floor,
             'connection_status': state, 'age_seconds': round(age)}
 
@@ -173,31 +162,13 @@ async def lifespan(app):
                     with app.state.lock:
                         app.state.store.add(scanner_result)
 
-                    # Forward campus scan to cloud Render server every 3s so cloud viewers see live floor
-                    if not os.getenv('RENDER') and res.get('signals') and (now - last_cloud_sync >= 3.0):
-                        last_cloud_sync = now
-                        def _sync(sigs):
-                            try:
-                                import urllib.request
-                                sync_req = urllib.request.Request(
-                                    'https://campusloc-live.onrender.com/api/scan/report',
-                                    data=json.dumps({
-                                        'device_id': 'campus-host-scanner',
-                                        'display_name': 'Campus Scanner (Host Wi-Fi)',
-                                        'signals': sigs
-                                    }).encode('utf-8'),
-                                    headers={'Content-Type': 'application/json'}
-                                )
-                                urllib.request.urlopen(sync_req, timeout=3)
-                            except Exception:
-                                pass
-                        threading.Thread(target=_sync, args=(res['signals'],), daemon=True).start()
             except Exception as e:
                 LOG.debug('Host Wi-Fi background scan: %s', e)
             stop_scanner.wait(2.0)
 
     scanner_thread = threading.Thread(target=host_scanner_loop, daemon=True)
-    scanner_thread.start()
+    if os.getenv('ENABLE_HOST_SCANNER') == '1':
+        scanner_thread.start()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='campusloc-receiver')
     if os.getenv('MQTT_USERNAME'):
@@ -241,8 +212,9 @@ async def lifespan(app):
     client.on_connect = connected
     client.on_disconnect = disconnected
     client.on_message = message
-    client.connect_async(os.getenv('MQTT_HOST', 'localhost'), int(os.getenv('MQTT_PORT', '1883')), 60)
-    client.loop_start()
+    if os.getenv('ENABLE_MQTT', '1') == '1':
+        client.connect_async(os.getenv('MQTT_HOST', 'localhost'), int(os.getenv('MQTT_PORT', '1883')), 60)
+        client.loop_start()
     try:
         yield
     finally:
@@ -305,66 +277,78 @@ def predict_custom(payload: CustomScanPayload):
 
 
 class RemoteScanReport(BaseModel):
-    device_id: str
-    display_name: str
-    signals: dict[str, float]
+    device_id: str = Field(max_length=64)
+    display_name: str = Field(max_length=40)
+    scan_id: str = Field(max_length=64)
+    captured_at: StrictFloat
+    signals: dict[str, StrictFloat] = Field(min_length=1, max_length=1000)
+
+
+def authenticated_user(request):
+    header = request.headers.get('authorization', '')
+    user = db.decode_token(header[7:]) if header.startswith('Bearer ') else None
+    if not user:
+        raise HTTPException(401, 'Sign in before uploading scans')
+    return user
 
 
 @app.post('/api/scan/report')
-def report_remote_scan(payload: RemoteScanReport):
-    """Receive live Wi-Fi signals from an on-campus machine and predict with model.pkl."""
-    now = time.time()
+def report_remote_scan(payload: RemoteScanReport, request: Request):
+    """Predict only from the authenticated participant's own complete scan."""
+    import hashlib
+    user = authenticated_user(request)
+    if not ID.fullmatch(payload.device_id):
+        raise HTTPException(422, 'Invalid device ID')
+    device = 'user-' + str(user['sub']) + '-' + hashlib.sha256(payload.device_id.encode()).hexdigest()[:16]
+    data = payload.model_dump()
+    data['device_id'] = device
+    data['display_name'] = user.get('name') or payload.display_name
     try:
-        prediction = predict_signals(app.state.bundle, payload.signals, min_known=3)
-        floor = prediction['predicted_floor']
-        floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
-        floor_formatted = floor_map.get(floor.lower(), floor.capitalize())
-        scanner_result = {
-            'device_id': payload.device_id,
-            'display_name': payload.display_name,
-            'scan_id': f'remote-{int(now * 1000)}',
-            'captured_at': now,
-            'received_at': now,
-            'detected_access_points': len(payload.signals),
-            'recognized_access_points': prediction.get('recognized_access_points', 0),
-            'total_model_access_points': 100,
-            'predicted_floor': floor_formatted,
-            'status': prediction.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
-            'device_type': 'scanner',
-            'scores': prediction.get('uncalibrated_model_scores', {}),
-            'latency_ms': 15.0,
-            'is_out_of_box': False,
-            'message': f"Live campus Wi-Fi prediction from model.pkl ({prediction.get('recognized_access_points', 0)} APs matched)"
-        }
-        with app.state.lock:
-            app.state.store.add(scanner_result)
-        return {'success': True, 'predicted_floor': floor_formatted, **prediction}
-    except Exception as e:
-        return {'success': False, 'error': str(e), 'is_out_of_box': True, 'predicted_floor': 'Out of Box'}
+        result = process_scan(app.state.bundle, f'campusloc/{device}/scan', json.dumps(data).encode())
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    result.update(transport='https', device_type='phone', user_id=user['sub'])
+    with app.state.lock:
+        if not app.state.store.add(result):
+            raise HTTPException(409, 'Duplicate or out-of-order scan')
+    # Record only this participant's estimate, never a host or another user's floor.
+    if result.get('predicted_floor'):
+        db.record_live_heartbeat(device, result['predicted_floor'], user_id=int(user['sub']), user_name=result['display_name'])
+    else:
+        db.close_user_session(device)
+    return public_result(result, app.state.connected)
 
 
 @app.get('/api/latest/{device}')
-def latest(device: str):
+def latest(device: str, request: Request):
+    user = authenticated_user(request)
     with app.state.lock:
         result = app.state.latest.get(device)
         if result is None:
             raise HTTPException(404, 'No scans received for this device')
+        if user.get('role') != 'admin' and str(result.get('user_id')) != str(user['sub']):
+            raise HTTPException(403, 'This device belongs to another account')
         return public_result(result, app.state.connected)
 
 
 @app.get('/api/devices')
-def devices():
+def devices(request: Request):
+    user = authenticated_user(request)
     with app.state.lock:
-        rows = [public_result(row, app.state.connected) for row in app.state.latest.values()]
+        rows = [public_result(row, app.state.connected) for row in app.state.latest.values()
+                if user.get('role') == 'admin' or str(row.get('user_id')) == str(user['sub'])]
     return {'devices': sorted(rows, key=lambda row: row['display_name'].casefold()),
-            'broker_connected': app.state.connected}
+            'broker_connected': app.state.connected, 'scan_transport': 'https'}
 
 
 @app.get('/api/history/{device}')
-def history(device: str):
+def history(device: str, request: Request):
+    user = authenticated_user(request)
     with app.state.lock:
         if device not in app.state.store.history:
             raise HTTPException(404, 'No scans received for this device')
+        if user.get('role') != 'admin' and str(app.state.latest[device].get('user_id')) != str(user['sub']):
+            raise HTTPException(403, 'This device belongs to another account')
         return {'history': list(app.state.store.history[device])}
 
 
@@ -378,7 +362,7 @@ def android_download():
 
 @app.get('/health')
 def health():
-    return {'broker_connected': app.state.connected, 'status': 'experimental'}
+    return {'broker_connected': app.state.connected, 'status': 'experimental', 'version': '1.3', 'scan_transport': 'https', 'requires_localhost': False}
 
 
 class WebUserPayload(BaseModel):
@@ -403,96 +387,23 @@ def web_user_heartbeat(payload: WebUserPayload, request: Request):
         user_info = db.decode_token(auth_hdr[7:])
 
     now = time.time()
-    with app.state.lock:
-        # Automatically fetch real-time prediction lively without lag
-        campus_floor, detected_aps, recognized_aps = get_active_campus_floor(app.state.latest, now)
-        scores = {}
-        latency_ms = 15.0
-
-        if not campus_floor:
-            try:
-                res = scan_and_predict(app.state.bundle)
-                if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
-                    campus_floor = res['predicted_floor']
-                    detected_aps = res.get('detected_access_points', 0)
-                    recognized_aps = res.get('recognized_access_points', 0)
-                    scores = res.get('uncalibrated_model_scores', {})
-                    latency_ms = res.get('latency_ms', 15.0)
-            except Exception:
-                pass
-
-        if campus_floor and campus_floor != 'Out of Box':
-            floor = campus_floor
-            is_out_of_box = False
-        else:
-            floor = None
-            is_out_of_box = True
-
-        final_display_name = (user_info['name'] if user_info and user_info.get('name') else name)
-
-        result = {
-            'device_id': device,
-            'display_name': final_display_name,
-            'user_email': user_info.get('email') if user_info else None,
-            'user_id': user_info.get('sub') if user_info else None,
-            'user_role': user_info.get('role') if user_info else 'guest',
-            'scan_id': f'web-{int(now * 1000)}',
-            'captured_at': now,
-            'received_at': now,
-            'detected_access_points': detected_aps,
-            'recognized_access_points': recognized_aps,
-            'total_model_access_points': 100,
-            'predicted_floor': floor or 'Out of Box',
-            'scores': scores,
-            'latency_ms': latency_ms,
-            'is_out_of_box': is_out_of_box,
-            'status': 'out_of_box' if is_out_of_box else 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION',
-            'device_type': 'web',
-            'platform': payload.platform or 'browser',
-            'message': 'Out of Box · Outside Wi-Fi coverage' if is_out_of_box else f"Live AI prediction from model.pkl ({recognized_aps} APs matched)"
-        }
-        app.state.store.add(result)
-
-        # DO NOT RECORD OUT OF BOX DATA
-        if is_out_of_box or not floor or floor == 'Out of Box':
-            try:
-                db.close_user_session(device, now)
-            except Exception:
-                pass
-        else:
-            try:
-                db.record_live_heartbeat(
-                    device_id=device,
-                    floor=floor,
-                    user_id=int(user_info['sub']) if user_info and user_info.get('sub') else None,
-                    user_name=final_display_name,
-                    user_email=user_info.get('email') if user_info else None,
-                    now=now
-                )
-            except Exception:
-                LOG.exception('Failed to log heartbeat to DB')
-
-        return public_result(result, app.state.connected, now)
+    # Browser presence is not Wi-Fi evidence. Do not borrow the host's location.
+    result = {
+        'device_id': device, 'display_name': name,
+        'scan_id': f'web-{int(now * 1000)}', 'captured_at': now, 'received_at': now,
+        'detected_access_points': 0, 'recognized_access_points': 0,
+        'device_type': 'web', 'status': 'cannot_localize',
+        'error': 'Browser cannot read Wi-Fi scans. Use the Android app with your account.',
+        'message': 'No individual Wi-Fi measurements received.'
+    }
+    # Presence is returned only to this viewer; it is not a location or attendance record.
+    return public_result(result, app.state.connected, now)
 
 
 @app.post('/api/web-user/leave')
 async def web_user_leave(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        body = await request.body()
-        try:
-            data = json.loads(body.decode('utf-8'))
-        except Exception:
-            data = {}
-    device = data.get('device_id')
-    if device and isinstance(device, str):
-        with app.state.lock:
-            app.state.latest.pop(device, None)
-            app.state.store.history.pop(device, None)
+    # Browsers do not own or delete scanner records.
     return {'status': 'ok'}
-
-
 # --- Authentication & Admin Endpoints ---
 
 class AuthRegisterPayload(BaseModel):
@@ -518,6 +429,8 @@ def auth_register(payload: AuthRegisterPayload):
 
 @app.post('/api/auth/login')
 def auth_login(payload: AuthLoginPayload):
+    if payload.email.strip().lower() == 'admin@campusloc.internal' and payload.password == 'admin123':
+        raise HTTPException(403, 'Default admin password disabled; configure a unique administrator password')
     user = db.authenticate_user(payload.email, payload.password)
     if not user:
         raise HTTPException(401, 'Invalid email or password')

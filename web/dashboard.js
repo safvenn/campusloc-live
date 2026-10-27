@@ -110,37 +110,15 @@ function updateMyPresenceUI(extraData) {
   const latencyBadge = $('#model-latency-badge');
   if (!nameEl) return;
 
-  const isOutOfBox = myPredictedFloor === 'Out of Box' || myPredictedFloor === 'out_of_box';
-
-  nameEl.textContent = currentUser ? currentUser.name + ' (' + currentUser.role + ')' : myDisplayName;
+  nameEl.textContent = currentUser ? currentUser.name : myDisplayName;
   idEl.textContent = myDeviceId;
+  floorEl.textContent = 'Use the Android app';
+  floorEl.className = 'presence-floor-value';
+  if (noteEl) noteEl.textContent = 'Each phone must upload its own Wi-Fi scan. Browser visits do not locate people.';
+  if (statusMeta) statusMeta.textContent = 'No hotspot required · Sign in on the app';
+  if (scoreBadge) scoreBadge.textContent = 'No browser Wi-Fi measurements';
+  if (latencyBadge) latencyBadge.textContent = '—';
 
-  if (isOutOfBox) {
-    floorEl.innerHTML = '📦 Out of Box';
-    floorEl.className = 'presence-floor-value out-of-box-text';
-    if (cardEl) cardEl.classList.add('out-of-box-active');
-    if (noteEl) noteEl.innerHTML = '<span class="out-of-box-banner">⚡ Outside Wi-Fi · Dwell not recorded</span>';
-    if (statusMeta) statusMeta.textContent = 'Outside Wi-Fi coverage · Dwell not recorded';
-    if (scoreBadge) scoreBadge.textContent = '📦 Out of Box';
-    if (latencyBadge) latencyBadge.textContent = '⚡ 0ms';
-  } else {
-    floorEl.textContent = myPredictedFloor + (myPredictedFloor.endsWith('Floor') ? '' : ' Floor');
-    floorEl.className = 'presence-floor-value';
-    if (cardEl) cardEl.classList.remove('out-of-box-active');
-    if (noteEl) noteEl.textContent = 'model.pkl live sync';
-    if (statusMeta) statusMeta.textContent = 'Live AI Wi-Fi Fingerprinting (model.pkl)';
-
-    if (extraData) {
-      const aps = extraData.recognized_access_points || extraData.detected_access_points || 14;
-      let conf = 99;
-      if (extraData.scores) {
-        const k = myPredictedFloor.toLowerCase();
-        if (extraData.scores[k]) conf = Math.round(extraData.scores[k] * 100);
-      }
-      if (scoreBadge) scoreBadge.textContent = `● ${myPredictedFloor} Floor (${conf}% match · ${aps} APs)`;
-      if (latencyBadge) latencyBadge.textContent = `⚡ ~${Math.round(extraData.latency_ms || 15)}ms latency`;
-    }
-  }
 }
 
 async function sendHeartbeat() {
@@ -285,7 +263,7 @@ async function renderDetail() {
   try {
     const response = await fetch('/api/history/' + encodeURIComponent(selectedDevice), {
       signal: AbortSignal.timeout(5000),
-      cache: 'no-store'
+      cache: 'no-store', headers: {Authorization: 'Bearer ' + authToken}
     });
     if (!response.ok) throw Error();
     const data = await response.json();
@@ -409,13 +387,14 @@ async function poll() {
 
     const response = await fetch('/api/devices', {
       signal: AbortSignal.timeout(5000),
-      cache: 'no-store'
+      cache: 'no-store', headers: {Authorization: 'Bearer ' + authToken}
     });
+    if (response.status === 401) { rows = []; render(); $('#connection').textContent = 'Sign in to view your devices'; return; }
     if (!response.ok) throw Error();
     const data = await response.json();
     rows = data.devices;
     serverOk = true;
-    $('#connection').textContent = data.broker_connected ? '● Broker connected' : '○ Broker disconnected';
+    $('#connection').textContent = '● Server connected · Direct HTTPS scans';
     $('#updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
     // If my device has an entry in rows, update my predicted floor
@@ -450,9 +429,7 @@ $('#close-detail').onclick = () => { selectedDevice = ''; history.replaceState(n
 $('#join').onclick = () => $('#setup').showModal();
 $('#close-setup').onclick = () => $('#setup').close();
 
-$('#broker-address').value = ['localhost', '127.0.0.1'].includes(location.hostname)
-  ? 'tcp://YOUR_LAPTOP_IP:1883'
-  : 'tcp://' + location.hostname + ':1883';
+$('#broker-address').value = location.origin;
 
 // Nickname rename handling
 const renameDialog = $('#rename-dialog');

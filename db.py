@@ -11,7 +11,9 @@ import jwt
 
 ROOT = Path(__file__).resolve().parent
 DATABASE_URL = os.getenv('DATABASE_URL', '')
-JWT_SECRET = os.getenv('JWT_SECRET', 'campusloc-super-secret-key-2026-experimental')
+JWT_SECRET = os.getenv('JWT_SECRET') or os.urandom(32).hex()
+if os.getenv('RENDER') and not os.getenv('JWT_SECRET'):
+    raise RuntimeError('Set JWT_SECRET on the hosted server')
 JWT_ALGORITHM = 'HS256'
 
 IS_POSTGRES = bool(DATABASE_URL and DATABASE_URL.startswith(('postgres://', 'postgresql://')))
@@ -123,9 +125,9 @@ def init_db():
         # Seed default Admin account if not exists
         cur.execute("SELECT id FROM users WHERE email = %s" if IS_POSTGRES else "SELECT id FROM users WHERE email = ?",
                     ('admin@campusloc.internal',))
-        if not cur.fetchone():
+        if not cur.fetchone() and os.getenv('ADMIN_INITIAL_PASSWORD'):
             now = time.time()
-            admin_pwd = hash_password('admin123')
+            admin_pwd = hash_password(os.environ['ADMIN_INITIAL_PASSWORD'])
             if IS_POSTGRES:
                 cur.execute("""
                     INSERT INTO users (email, name, password_hash, role, created_at)
