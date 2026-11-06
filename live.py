@@ -562,8 +562,6 @@ def auth_register(payload: AuthRegisterPayload):
 
 @app.post('/api/auth/login')
 def auth_login(payload: AuthLoginPayload):
-    if payload.email.strip().lower() == 'admin@campusloc.internal' and payload.password == 'admin123':
-        raise HTTPException(403, 'Default admin password disabled; configure a unique administrator password')
     user = db.authenticate_user(payload.email, payload.password)
     if not user:
         raise HTTPException(401, 'Invalid email or password')

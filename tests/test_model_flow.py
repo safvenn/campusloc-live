@@ -112,6 +112,28 @@ class ModelFlowTests(unittest.TestCase):
             self.assertIn('campus-host-scanner', device_ids)
             self.assertIn('user-1001-dev', device_ids)
 
+    def test_admin_credentials_login(self):
+        with TestClient(live.app) as client:
+            res = client.post('/api/auth/login', json={'email': 'admin@campusloc.internal', 'password': 'admin123'})
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertIn('token', data)
+            self.assertEqual(data['user']['role'], 'admin')
+            self.assertEqual(data['user']['email'], 'admin@campusloc.internal')
+
+            # Verify admin token allows accessing /api/admin/analytics
+            auth_header = {'Authorization': f'Bearer {data["token"]}'}
+            analytics_res = client.get('/api/admin/analytics', headers=auth_header)
+            self.assertEqual(analytics_res.status_code, 200)
+            analytics = analytics_res.json()
+            self.assertIn('floor_summary', analytics)
+            self.assertIn('user_breakdown', analytics)
+
+            # Verify /api/auth/me returns admin
+            me_res = client.get('/api/auth/me', headers=auth_header)
+            self.assertEqual(me_res.status_code, 200)
+            self.assertEqual(me_res.json()['user']['role'], 'admin')
+
 
 if __name__ == '__main__':
     unittest.main()
