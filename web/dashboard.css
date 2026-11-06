@@ -173,6 +173,11 @@ a{color:#205e46}
 .model-arch-note code{background:#e4ede5;padding:2px 5px;border-radius:4px;color:#18352e;font-size:10.5px}
 
 .scan-action-btns{display:flex;gap:8px;margin-top:10px}
+.quick-floor-switcher{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap}
+.switcher-label{font-size:11px;font-weight:700;color:#5a6e61;text-transform:uppercase;letter-spacing:0.5px}
+.floor-chip{background:#f3f7f4;border:1px solid #cad8ce;color:#184a37;padding:3px 9px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;transition:all .15s}
+.floor-chip:hover{background:#205e46;color:#fff;border-color:#205e46}
+.floor-chip.active{background:#205e46;color:#fff;border-color:#185934;box-shadow:0 2px 6px rgba(32,94,70,0.25)}
 
 @keyframes pulse{0%{opacity:.6;transform:scale(.92)}50%{opacity:1;transform:scale(1.15)}100%{opacity:.6;transform:scale(.92)}}
 @keyframes pulse-amber{0%{opacity:.6;transform:scale(.92);box-shadow:0 0 0 0 rgba(245,158,11,0.7)}50%{opacity:1;transform:scale(1.18);box-shadow:0 0 8px 3px rgba(245,158,11,0.4)}100%{opacity:.6;transform:scale(.92);box-shadow:0 0 0 0 rgba(245,158,11,0)}}

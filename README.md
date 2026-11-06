@@ -54,12 +54,15 @@ Traditional GPS signals degrade significantly inside multi-story concrete struct
 
 ### Key Features
 
-1. **Machine Learning Floor Classification:** Evaluates surrounding BSSID fingerprints against a trained estimator bundle (`outputs/wifi_floor_experimental.pkl`) across 6 building floors.
-2. **Real-Time Web Visitor Tracking:** When anyone opens the site on a phone or PC, they are automatically identified, assigned a predicted floor based on the campus network, and counted in live building occupancy.
-3. **User Authentication (JWT):** Secure user sign-up and sign-in with password hashing (PBKDF2) and 7-day signed JWT tokens.
-4. **Floor Dwell-Time Intelligence:** Continuously monitors and records how long users spend on each floor, automatically finalizing sessions when users change floors or leave.
-5. **Administrator Analytics View:** Visual dashboard featuring dwell time progress bars per floor, total minutes spent, and a searchable user breakdown table.
-6. **Multi-Source Ingestion:** Supports native Android app scans, Windows laptop background scanning, and browser presence heartbeats.
+1. **Machine Learning Floor Classification:** Evaluates surrounding BSSID fingerprints against a trained estimator bundle (`model.pkl`) across 6 building floors (`Ground`, `First`, `Second`, `Third`, `Fourth`, `B1`).
+2. **Interactive Model Flow Inspector:** Real-time 5-step ML pipeline visualizer tracing input Wi-Fi signals $\to$ 100-feature vector alignment $\to$ StandardScaler Z-score normalization $\to$ LogisticRegression $\to$ Softmax probabilities with interactive floor presets and latency measurements.
+3. **No Hotspot Required:** Operates over standard campus WLAN, university eduroam, or cellular data using direct HTTPS REST endpoints with Bearer tokens.
+4. **24/7 Cloud Operation (Laptop Powered Off):** Hosted 24/7 on Render (`https://campusloc-live.onrender.com`) and Vercel (`https://campusloc-web.vercel.app`) with PostgreSQL and SQLite support.
+5. **Real-Time Web Visitor & Device Tracking:** Multi-device overview displaying live building occupancy across all floors without requiring local network bridging.
+6. **User Authentication (JWT):** Secure user sign-up and sign-in with password hashing (PBKDF2) and 7-day signed JWT tokens.
+7. **Floor Dwell-Time Intelligence:** Continuously monitors and records how long users spend on each floor, automatically finalizing sessions when users change floors or leave.
+8. **Administrator Analytics View:** Visual dashboard featuring dwell time progress bars per floor, total minutes spent, and a searchable user breakdown table.
+9. **Multi-Source Ingestion:** Supports native Android app scans (CampusLoc APK 1.3), Windows host scanning, preset radio testing, and browser presence heartbeats.
 
 ---
 
@@ -180,9 +183,15 @@ Available to authenticated administrators:
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/web-user/heartbeat` | Send live presence heartbeat and floor selection | Optional (Links user) |
 | `POST` | `/api/web-user/leave` | Gracefully notify server of user departure | No |
-| `GET` | `/api/devices` | Get all active devices, predicted floors, and broker state | No |
-| `GET` | `/api/latest/{device}` | Get latest scan prediction for a specific device | No |
-| `GET` | `/api/history/{device}` | Get recent 60 scan history for a device | No |
+| `GET` | `/api/network/overview` | Public WLAN campus building occupancy and active devices | No |
+| `GET` | `/api/devices` | Get active devices (`?scope=all` for all WLAN devices) | Bearer Token / Admin |
+| `GET` | `/api/latest/{device}` | Get latest scan prediction for a specific device | Bearer Token / Owner |
+| `GET` | `/api/history/{device}` | Get recent 60 scan history for a device | Bearer Token / Owner |
+| `GET` | `/api/predict/presets` | Get preset BSSID radio fingerprints for all 6 floors | No |
+| `POST` | `/api/predict/preset/{floor}` | Run model.pkl pipeline on preset floor fingerprint | No |
+| `POST` | `/api/predict` | Predict floor from arbitrary BSSID readings | No |
+| `POST` | `/api/scan/live` | Trigger immediate host Wi-Fi scan and model.pkl prediction | No |
+| `GET` | `/download/android` | Download native Android APK (`CampusLoc-debug.apk`) | No |
 | `GET` | `/health` | Server and broker connectivity health check | No |
 
 ---
