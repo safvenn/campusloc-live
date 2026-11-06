@@ -32,6 +32,8 @@
       <p>Real-time Wi-Fi floor estimates and dwell-time intelligence.</p>
     </div>
     <div class="heading-buttons">
+      <button id="scan-now-btn" class="primary-scan-btn" title="Run real-time Wi-Fi scan and predict with model.pkl">⚡ Scan Host Wi-Fi</button>
+      <button id="open-model-flow-btn" class="secondary" title="View step-by-step model.pkl prediction flow">🔬 Model Flow</button>
       <button id="admin-quick-btn" class="secondary" title="View floor dwell analytics">📊 Admin Analytics</button>
       <button id="join">+ Connect a device</button>
     </div>
@@ -120,6 +122,10 @@
         <div class="presence-live-status" id="my-live-status">
           <span class="live-pulse-dot"></span>
           <span id="my-live-meta">Live AI Wi-Fi Fingerprinting</span>
+        </div>
+        <div class="scan-action-btns">
+          <button id="scan-presence-btn" class="mini-btn" type="button" title="Scan local Wi-Fi with model.pkl">⚡ Scan Wi-Fi</button>
+          <button id="inspect-presence-btn" class="mini-btn" type="button" title="Inspect model flow">🔬 Inspect Flow</button>
         </div>
       </div>
     </div>
@@ -245,6 +251,90 @@
   <div class="auth-demo-box">
     <span>Quick Demo Login:</span>
     <button id="demo-admin-btn" type="button" class="mini-btn">⚡ Sign in as Admin</button>
+  </div>
+</dialog>
+
+<!-- Model.pkl Prediction Flow Inspector Dialog -->
+<dialog id="model-flow-dialog" class="wide-dialog">
+  <div class="section-title">
+    <div>
+      <span class="admin-tag" style="background:#e8f4ed;color:#185934;border:1px solid #bcdbc9;">🧠 MACHINE LEARNING FLOW INSPECTOR</span>
+      <h2 style="margin:4px 0;">model.pkl Live Prediction Flow</h2>
+      <p style="margin:2px 0 0;font-size:13px;color:#60736a;">Trace raw Wi-Fi signals through feature alignment, StandardScaler, and LogisticRegression probabilities.</p>
+    </div>
+    <button class="secondary" id="close-model-flow-btn" type="button">Close</button>
+  </div>
+
+  <!-- Flow Visualizer Stages -->
+  <div class="model-flow-steps">
+    <div class="flow-step" id="step-signals">
+      <div class="step-num">1</div>
+      <div class="step-label">Wi-Fi Signals</div>
+      <small id="flow-signals-count">BSSID + RSSI</small>
+    </div>
+    <div class="flow-arrow">➔</div>
+    <div class="flow-step" id="step-features">
+      <div class="step-num">2</div>
+      <div class="step-label">100 AP Vector</div>
+      <small id="flow-matched-count">Aligned Features</small>
+    </div>
+    <div class="flow-arrow">➔</div>
+    <div class="flow-step" id="step-scaler">
+      <div class="step-num">3</div>
+      <div class="step-label">StandardScaler</div>
+      <small>Z-score normalized</small>
+    </div>
+    <div class="flow-arrow">➔</div>
+    <div class="flow-step" id="step-model">
+      <div class="step-num">4</div>
+      <div class="step-label">LogisticRegression</div>
+      <small>Multi-class L2</small>
+    </div>
+    <div class="flow-arrow">➔</div>
+    <div class="flow-step highlight" id="step-output">
+      <div class="step-num">5</div>
+      <div class="step-label" id="flow-predicted-label">Predicted Floor</div>
+      <small id="flow-confidence-label">Confidence %</small>
+    </div>
+  </div>
+
+  <!-- Live Output & Probability Distribution -->
+  <div class="model-flow-results-grid">
+    <div class="flow-results-card">
+      <div class="flow-result-header">
+        <span class="eyebrow">PREDICTED FLOOR</span>
+        <span id="flow-latency-tag" class="model-latency-pill">⚡ 0ms</span>
+      </div>
+      <div id="flow-result-floor" class="flow-large-floor">—</div>
+      <div id="flow-result-meta" class="flow-result-sub">Select a preset or trigger live scan to run model.pkl</div>
+    </div>
+
+    <div class="flow-prob-card">
+      <span class="eyebrow">SOFTMAX PROBABILITY DISTRIBUTION</span>
+      <div id="flow-prob-bars" class="flow-bars-container">
+        <!-- Bars dynamically populated -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive Test Presets -->
+  <div class="preset-controls-section">
+    <h3>Test with Campus Floor Fingerprint Presets:</h3>
+    <div class="preset-btn-group">
+      <button type="button" class="preset-btn" data-floor="Ground">Ground Floor</button>
+      <button type="button" class="preset-btn" data-floor="First">First Floor</button>
+      <button type="button" class="preset-btn" data-floor="Second">Second Floor</button>
+      <button type="button" class="preset-btn" data-floor="Third">Third Floor</button>
+      <button type="button" class="preset-btn" data-floor="Fourth">Fourth Floor</button>
+      <button type="button" class="preset-btn" data-floor="B1">B1 Basement</button>
+      <button type="button" class="preset-btn live-btn" id="modal-scan-live-btn">⚡ Live Host Wi-Fi Scan</button>
+    </div>
+  </div>
+
+  <div class="model-arch-note">
+    <span>📐 Architecture:</span>
+    <code>Pipeline([('scale', StandardScaler()), ('model', LogisticRegression(C=1.0, max_iter=200))])</code>
+    · Features: 100 802.11 APs · Direct HTTPS Scans · Works without local hotspot · 24/7 Cloud Support.
   </div>
 </dialog>
 

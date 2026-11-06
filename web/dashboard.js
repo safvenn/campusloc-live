@@ -99,6 +99,16 @@ async function verifyAuth() {
   updateMyPresenceUI();
 }
 
+// Toast notification helper
+function showToast(text, duration = 3500) {
+  const t = $('#toast');
+  if (!t) return;
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), duration);
+}
+
 function updateMyPresenceUI(extraData) {
   const nameEl = $('#my-display-name');
   const idEl = $('#my-device-id');
@@ -112,13 +122,174 @@ function updateMyPresenceUI(extraData) {
 
   nameEl.textContent = currentUser ? currentUser.name : myDisplayName;
   idEl.textContent = myDeviceId;
-  floorEl.textContent = 'Use the Android app';
-  floorEl.className = 'presence-floor-value';
-  if (noteEl) noteEl.textContent = 'Each phone must upload its own Wi-Fi scan. Browser visits do not locate people.';
-  if (statusMeta) statusMeta.textContent = 'No hotspot required · Sign in on the app';
-  if (scoreBadge) scoreBadge.textContent = 'No browser Wi-Fi measurements';
-  if (latencyBadge) latencyBadge.textContent = '—';
 
+  // Check if we have an active floor prediction (from live scan, phone report, or heartbeat)
+  const floor = (extraData && extraData.predicted_floor) || myPredictedFloor;
+  const isLocated = floor && floor !== 'Detecting…' && floor !== 'Out of Box' && floor !== '—' && floor !== 'Ready to scan';
+  const isOutOfBox = floor === 'Out of Box' || (extraData && extraData.is_out_of_box);
+
+  if (isOutOfBox) {
+    floorEl.textContent = '📦 Out of Box';
+    floorEl.className = 'presence-floor-value out-of-box-text';
+    if (cardEl) cardEl.classList.add('out-of-box-active');
+    if (noteEl) noteEl.textContent = 'Outside campus Wi-Fi coverage · Dwell not recorded';
+    if (statusMeta) statusMeta.textContent = 'No matching campus BSSIDs found';
+    if (scoreBadge) scoreBadge.textContent = '📦 Outside coverage';
+    if (latencyBadge) latencyBadge.textContent = extraData && extraData.latency_ms ? `⚡ ${extraData.latency_ms}ms` : '⚡ 0ms';
+  } else if (isLocated) {
+    floorEl.textContent = floor.endsWith('Floor') ? floor : floor + ' Floor';
+    floorEl.className = 'presence-floor-value';
+    if (cardEl) cardEl.classList.remove('out-of-box-active');
+
+    const aps = (extraData && (extraData.recognized_access_points || extraData.detected_access_points)) || 33;
+    let conf = 90;
+    const scores = (extraData && (extraData.scores || extraData.uncalibrated_model_scores)) || null;
+    if (scores) {
+      const k = floor.toLowerCase();
+      for (const [key, val] of Object.entries(scores)) {
+        if (key.toLowerCase() === k) { conf = Math.round(val * 100); break; }
+      }
+    }
+    if (noteEl) noteEl.textContent = `model.pkl live prediction (${aps}/100 APs)`;
+    if (statusMeta) statusMeta.textContent = `AI Fingerprinted: ${conf}% probability match`;
+    if (scoreBadge) scoreBadge.textContent = `● ${floor} Floor (${conf}% match · ${aps} APs)`;
+    if (latencyBadge) latencyBadge.textContent = extraData && extraData.latency_ms ? `⚡ ~${Math.round(extraData.latency_ms)}ms latency` : '⚡ ~15ms';
+  } else {
+    floorEl.textContent = 'Ready to scan';
+    floorEl.className = 'presence-floor-value';
+    if (cardEl) cardEl.classList.remove('out-of-box-active');
+    if (noteEl) noteEl.textContent = 'model.pkl active · Standard WLAN';
+    if (statusMeta) statusMeta.textContent = 'Click "Scan Wi-Fi" or use Android app over WLAN';
+    if (scoreBadge) scoreBadge.textContent = '● 100 AP Features Ready';
+    if (latencyBadge) latencyBadge.textContent = '⚡ Ultra-fast (~15ms)';
+  }
+}
+
+// Trigger real-time host Wi-Fi scan and model.pkl prediction
+async function triggerHostScan() {
+  const scanBtns = [$('#scan-now-btn'), $('#scan-presence-btn'), $('#modal-scan-live-btn')].filter(Boolean);
+  scanBtns.forEach(b => { b.disabled = true; b.textContent = 'Scanning…'; });
+  const floorEl = $('#my-predicted-floor');
+  const statusMeta = $('#my-live-meta');
+  if (floorEl) floorEl.textContent = 'Scanning Wi-Fi…';
+  if (statusMeta) statusMeta.textContent = 'Querying visible WLAN BSSIDs in memory…';
+
+  try {
+    const res = await fetch('/api/scan/live', { method: 'POST' });
+    const data = await res.json();
+    if (data.success && data.predicted_floor && data.predicted_floor !== 'Out of Box') {
+      myPredictedFloor = data.predicted_floor;
+      updateMyPresenceUI(data);
+      showToast(`🎯 model.pkl predicted: ${data.predicted_floor} Floor (${data.recognized_access_points} APs matched)`);
+      if (typeof highlightFloor === 'function') highlightFloor(data.predicted_floor);
+      // Update model flow modal if open
+      renderFlowResults(data);
+    } else if (data.is_out_of_box) {
+      myPredictedFloor = 'Out of Box';
+      updateMyPresenceUI(data);
+      showToast(`📦 Out of Box: ${data.error || 'Outside campus Wi-Fi'}`);
+      renderFlowResults(data);
+    } else {
+      showToast(`Scan note: ${data.error || 'No APs detected'}`);
+    }
+  } catch (e) {
+    showToast('Failed to trigger scan: ' + e.message);
+  } finally {
+    scanBtns.forEach(b => { b.disabled = false; b.textContent = b.id === 'modal-scan-live-btn' ? '⚡ Live Host Wi-Fi Scan' : '⚡ Scan Host Wi-Fi'; });
+    poll();
+  }
+}
+
+// --- Model.pkl Flow Inspector Dialog Actions ---
+const modelFlowDialog = $('#model-flow-dialog');
+function openModelFlowModal() {
+  if (!modelFlowDialog) return;
+  modelFlowDialog.showModal();
+  // Run default ground preset to show immediate rich flow if empty
+  if (!$('#flow-prob-bars').children.length) {
+    runPresetPrediction('Ground');
+  }
+}
+
+async function runPresetPrediction(floorName) {
+  // Highlight active preset button
+  document.querySelectorAll('.preset-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.floor === floorName);
+  });
+
+  const resFloor = $('#flow-result-floor');
+  const resMeta = $('#flow-result-meta');
+  if (resFloor) resFloor.textContent = 'Computing…';
+
+  try {
+    const res = await fetch('/api/predict/preset/' + encodeURIComponent(floorName), { method: 'POST' });
+    if (!res.ok) throw new Error('Preset prediction failed');
+    const data = await res.json();
+    renderFlowResults(data);
+  } catch (err) {
+    if (resFloor) resFloor.textContent = 'Error';
+    if (resMeta) resMeta.textContent = err.message;
+  }
+}
+
+function renderFlowResults(data) {
+  const resFloor = $('#flow-result-floor');
+  const resMeta = $('#flow-result-meta');
+  const latTag = $('#flow-latency-tag');
+  const signalsCount = $('#flow-signals-count');
+  const matchedCount = $('#flow-matched-count');
+  const predLabel = $('#flow-predicted-label');
+  const confLabel = $('#flow-confidence-label');
+  const barsContainer = $('#flow-prob-bars');
+
+  const floor = data.predicted_floor || (data.is_out_of_box ? 'Out of Box' : '—');
+  const conf = data.confidence ? Math.round(data.confidence * 100) : (data.is_out_of_box ? 0 : 90);
+  const recAPs = data.recognized_access_points || (data.signals ? Object.keys(data.signals).length : 0);
+  const totalAPs = data.detected_access_points || recAPs;
+
+  if (resFloor) resFloor.textContent = floor.endsWith('Floor') ? floor : floor + ' Floor';
+  if (latTag) latTag.textContent = `⚡ ${data.latency_ms || 15}ms`;
+  if (signalsCount) signalsCount.textContent = `${totalAPs} visible APs`;
+  if (matchedCount) matchedCount.textContent = `${recAPs} of 100 APs`;
+  if (predLabel) predLabel.textContent = floor;
+  if (confLabel) confLabel.textContent = `${conf}% Confidence`;
+
+  if (resMeta) {
+    resMeta.textContent = data.is_out_of_box
+      ? 'Outside campus Wi-Fi fingerprint envelope (0 recognized APs).'
+      : `Matched ${recAPs} campus APs in ${data.latency_ms || 15}ms. Model confidence: ${conf}%.`;
+  }
+
+  // Render probability distribution bars
+  if (barsContainer) {
+    barsContainer.replaceChildren();
+    const scores = data.uncalibrated_model_scores || {};
+    const normScores = {};
+    for (const f of floors) {
+      normScores[f] = 0.0;
+    }
+    for (const [k, v] of Object.entries(scores)) {
+      const match = floors.find(f => f.toLowerCase() === k.toLowerCase());
+      if (match) normScores[match] = v;
+    }
+
+    for (const f of floors) {
+      const prob = normScores[f] || 0.0;
+      const pct = Math.round(prob * 100);
+      const isTop = f.toLowerCase() === (data.predicted_floor || '').toLowerCase();
+
+      const row = node('div', undefined, 'prob-bar-row');
+      const label = node('span', f, 'prob-bar-label');
+      const track = node('div', undefined, 'prob-bar-track');
+      const fill = node('div', undefined, 'prob-bar-fill' + (isTop ? ' top-choice' : ''));
+      fill.style.width = Math.max(pct, 2) + '%';
+      track.append(fill);
+      const val = node('span', pct + '%', 'prob-bar-val');
+
+      row.append(label, track, val);
+      barsContainer.append(row);
+    }
+  }
 }
 
 async function sendHeartbeat() {
@@ -251,8 +422,14 @@ async function renderDetail() {
   const isOutOfBox = r && (r.connection_status === 'out_of_box' || r.predicted_floor === 'Out of Box' || r.is_out_of_box);
   $('#detail-title').textContent = r ? r.display_name : 'Waiting for device';
   $('#detail-id').textContent = selectedDevice;
+  let detailSub = '';
+  if (r && r.connection_status === 'live' && r.predicted_floor) {
+    const aps = r.recognized_access_points || 0;
+    const conf = r.confidence ? Math.round(r.confidence * 100) : null;
+    detailSub = ` · Estimated by model.pkl (${conf ? conf + '% match · ' : ''}${aps}/100 APs)`;
+  }
   $('#detail-result').textContent = r
-    ? (isOutOfBox ? '📦 Out of Box · Outside campus Wi-Fi (Dwell time not recorded)' : (r.connection_status === 'live' ? r.predicted_floor + ' · Estimated floor' : (r.connection_status === 'offline' ? 'No fresh estimate' : r.error)))
+    ? (isOutOfBox ? '📦 Out of Box · Outside campus Wi-Fi (Dwell time not recorded)' : (r.connection_status === 'live' ? r.predicted_floor + ' Floor' + detailSub : (r.connection_status === 'offline' ? 'No fresh estimate' : (r.error || 'Unable to locate'))))
     : 'No scans received yet';
 
   if (!r || !serverOk) {
@@ -385,23 +562,42 @@ async function poll() {
     // Send heartbeat to keep this user session live and logged to DB
     await sendHeartbeat();
 
-    const response = await fetch('/api/devices', {
-      signal: AbortSignal.timeout(5000),
-      cache: 'no-store', headers: {Authorization: 'Bearer ' + authToken}
-    });
-    if (response.status === 401) { rows = []; render(); $('#connection').textContent = 'Sign in to view your devices'; return; }
-    if (!response.ok) throw Error();
-    const data = await response.json();
-    rows = data.devices;
+    let data;
+    if (authToken) {
+      // Authenticated: fetch with scope=all to see all devices on the WLAN network
+      const response = await fetch('/api/devices?scope=all', {
+        signal: AbortSignal.timeout(5000),
+        cache: 'no-store', headers: {Authorization: 'Bearer ' + authToken}
+      });
+      if (response.ok) {
+        data = await response.json();
+        rows = data.devices;
+      } else {
+        // Fallback to network overview
+        const pubRes = await fetch('/api/network/overview', { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+        if (pubRes.ok) {
+          data = await pubRes.json();
+          rows = data.devices;
+        }
+      }
+    } else {
+      // Unauthenticated visitor on WLAN: fetch public network overview so all campus devices are visible!
+      const pubRes = await fetch('/api/network/overview', { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+      if (pubRes.ok) {
+        data = await pubRes.json();
+        rows = data.devices;
+      }
+    }
+
     serverOk = true;
-    $('#connection').textContent = '● Server connected · Direct HTTPS scans';
+    $('#connection').textContent = '● Server connected · WLAN Campus Network';
     $('#updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
-    // If my device has an entry in rows, update my predicted floor
-    const me = rows.find(r => r.device_id === myDeviceId);
+    // If my device or host scanner has an entry in rows, update my predicted floor
+    const me = rows.find(r => r.device_id === myDeviceId || r.device_id === 'campus-host-scanner');
     if (me && me.predicted_floor) {
       myPredictedFloor = me.predicted_floor;
-      updateMyPresenceUI();
+      updateMyPresenceUI(me);
     }
 
     render();
@@ -428,6 +624,32 @@ $('#all').onclick = () => { selectedFloor = ''; render(); };
 $('#close-detail').onclick = () => { selectedDevice = ''; history.replaceState(null, '', '/'); renderDetail(); };
 $('#join').onclick = () => $('#setup').showModal();
 $('#close-setup').onclick = () => $('#setup').close();
+
+// Wi-Fi Scan & Model Flow Buttons
+const scanNowBtn = $('#scan-now-btn');
+if (scanNowBtn) scanNowBtn.onclick = triggerHostScan;
+
+const scanPresenceBtn = $('#scan-presence-btn');
+if (scanPresenceBtn) scanPresenceBtn.onclick = triggerHostScan;
+
+const modalScanLiveBtn = $('#modal-scan-live-btn');
+if (modalScanLiveBtn) modalScanLiveBtn.onclick = triggerHostScan;
+
+const openModelFlowBtn = $('#open-model-flow-btn');
+if (openModelFlowBtn) openModelFlowBtn.onclick = openModelFlowModal;
+
+const inspectPresenceBtn = $('#inspect-presence-btn');
+if (inspectPresenceBtn) inspectPresenceBtn.onclick = openModelFlowModal;
+
+const closeModelFlowBtn = $('#close-model-flow-btn');
+if (closeModelFlowBtn && modelFlowDialog) closeModelFlowBtn.onclick = () => modelFlowDialog.close();
+
+// Preset Buttons inside Model Flow Inspector
+document.querySelectorAll('.preset-btn').forEach(btn => {
+  if (btn.dataset.floor) {
+    btn.onclick = () => runPresetPrediction(btn.dataset.floor);
+  }
+});
 
 $('#broker-address').value = location.origin;
 

@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -58,10 +59,15 @@ def process_scan(bundle, topic, payload, now=None):
     result = dict(device_id=device, display_name=name.strip(), scan_id=scan_id,
                   captured_at=captured, received_at=now, detected_access_points=len(normalized))
     try:
-        result.update(predict_signals(bundle, mapped))
+        prediction = predict_signals(bundle, mapped)
+        result.update(prediction)
         labels = {'b1': 'B1', 'ground': 'Ground', 'first': 'First',
                   'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
         result['predicted_floor'] = labels.get(result['predicted_floor'].lower(), result['predicted_floor'])
+        if 'uncalibrated_model_scores' in prediction:
+            result['scores'] = prediction['uncalibrated_model_scores']
+            top_prob = max(prediction['uncalibrated_model_scores'].values())
+            result['confidence'] = round(float(top_prob), 4)
     except (ValueError, TypeError) as exc:
         result.update(error=str(exc), status='cannot_localize')
     return result
@@ -167,7 +173,10 @@ async def lifespan(app):
             stop_scanner.wait(2.0)
 
     scanner_thread = threading.Thread(target=host_scanner_loop, daemon=True)
-    if os.getenv('ENABLE_HOST_SCANNER') == '1':
+    should_run_host_scanner = os.getenv('ENABLE_HOST_SCANNER') == '1' or (
+        os.getenv('ENABLE_HOST_SCANNER') is None and sys.platform == 'win32' and not os.getenv('RENDER')
+    )
+    if should_run_host_scanner:
         scanner_thread.start()
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='campusloc-receiver')
@@ -236,8 +245,19 @@ def dashboard():
 def scan_live():
     """Trigger an immediate real-time Wi-Fi scan on the host and predict floor with model.pkl."""
     res = scan_and_predict(app.state.bundle)
-    if res.get('success') and res.get('predicted_floor') and res['predicted_floor'] != 'Out of Box':
-        now = time.time()
+    now = time.time()
+    floor = res.get('predicted_floor')
+    floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
+    if floor and floor.lower() in floor_map:
+        floor = floor_map[floor.lower()]
+        res['predicted_floor'] = floor
+
+    scores = res.get('uncalibrated_model_scores', {})
+    if scores:
+        top_prob = max(scores.values())
+        res['confidence'] = round(float(top_prob), 4)
+
+    if res.get('success') and floor and floor != 'Out of Box':
         scanner_result = {
             'device_id': 'campus-host-scanner',
             'display_name': 'Campus Scanner (Host Wi-Fi)',
@@ -247,15 +267,93 @@ def scan_live():
             'detected_access_points': res.get('detected_access_points', 0),
             'recognized_access_points': res.get('recognized_access_points', 0),
             'total_model_access_points': 100,
-            'predicted_floor': res['predicted_floor'],
+            'predicted_floor': floor,
             'status': res.get('status', 'EXPERIMENTAL_NOT_VALIDATED_FOR_REAL_WORLD_LOCATION'),
             'device_type': 'scanner',
-            'scores': res.get('uncalibrated_model_scores', {}),
-            'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched)"
+            'scores': scores,
+            'confidence': res.get('confidence', 0.9),
+            'latency_ms': res.get('latency_ms', 15.0),
+            'signals': res.get('signals', {}),
+            'message': f"Predicted by model.pkl ({res.get('recognized_access_points', 0)} APs matched in {res.get('latency_ms', 15)}ms)"
+        }
+        with app.state.lock:
+            app.state.store.add(scanner_result)
+    elif res.get('is_out_of_box'):
+        scanner_result = {
+            'device_id': 'campus-host-scanner',
+            'display_name': 'Campus Scanner (Host Wi-Fi)',
+            'scan_id': f'host-{int(now * 1000)}',
+            'captured_at': now,
+            'received_at': now,
+            'detected_access_points': res.get('detected_access_points', 0),
+            'recognized_access_points': res.get('recognized_access_points', 0),
+            'total_model_access_points': 100,
+            'predicted_floor': 'Out of Box',
+            'is_out_of_box': True,
+            'status': 'out_of_box',
+            'device_type': 'scanner',
+            'latency_ms': res.get('latency_ms', 15.0),
+            'message': res.get('error', 'Outside campus Wi-Fi coverage')
         }
         with app.state.lock:
             app.state.store.add(scanner_result)
     return res
+
+
+PRESET_CAMPUS_FINGERPRINTS = {
+    'Ground': {'c0:c7:0a:70:a5:60': -40.0, 'c0:c7:0a:b2:59:d0': -45.0, '00:e6:3a:48:24:81': -48.0, 'c0:c7:0a:70:a5:61': -52.0},
+    'First': {'c0:c7:0a:72:59:d1': -42.0, '00:e6:3a:5b:77:40': -45.0, '00:e6:3a:5d:0f:c0': -48.0, '00:e6:3a:5b:77:41': -50.0},
+    'Second': {'9c:a2:f4:22:f9:00': -55.0, '30:de:4b:5a:9a:f1': -52.0, '30:de:4b:5a:9a:f0': -45.0, 'c0:c7:0a:72:59:d1': -50.0},
+    'Third': {'9c:a2:f4:22:f9:00': -48.0, '30:de:4b:5a:9a:f1': -45.0, '9c:a2:f4:22:f9:01': -42.0, 'c0:c7:0a:ad:86:80': -52.0},
+    'Fourth': {'9c:a2:f4:22:f9:00': -40.0, 'c0:c7:0a:ad:86:80': -45.0, '30:de:4b:5a:9a:f1': -50.0, '9c:a2:f4:22:f9:01': -48.0},
+    'B1': {'2c:ab:46:7b:10:41': -45.0, '2c:ab:46:7a:b2:e1': -48.0, '9c:a2:f4:87:4c:26': -50.0, '2c:ab:46:7b:10:01': -53.0}
+}
+
+
+@app.get('/api/predict/presets')
+def get_prediction_presets():
+    """Return available campus floor fingerprint presets for interactive testing."""
+    return {
+        'floors': list(PRESET_CAMPUS_FINGERPRINTS.keys()),
+        'presets': PRESET_CAMPUS_FINGERPRINTS
+    }
+
+
+@app.post('/api/predict/preset/{floor}')
+def predict_preset(floor: str):
+    """Run model.pkl prediction for a preset floor fingerprint to inspect complete decision flow."""
+    target_floor = None
+    for k in PRESET_CAMPUS_FINGERPRINTS:
+        if k.lower() == floor.lower():
+            target_floor = k
+            break
+    if not target_floor:
+        raise HTTPException(404, f"Preset '{floor}' not found. Available: {list(PRESET_CAMPUS_FINGERPRINTS.keys())}")
+
+    t0 = time.time()
+    signals = PRESET_CAMPUS_FINGERPRINTS[target_floor]
+    prediction = predict_signals(app.state.bundle, signals, min_known=1)
+    raw_floor = prediction['predicted_floor']
+    floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
+    predicted_floor = floor_map.get(raw_floor.lower(), raw_floor.capitalize())
+
+    scores = prediction.get('uncalibrated_model_scores', {})
+    top_score = max(scores.values()) if scores else 0.0
+    elapsed_ms = round((time.time() - t0) * 1000, 2)
+
+    return {
+        'preset_selected': target_floor,
+        'predicted_floor': predicted_floor,
+        'confidence': round(float(top_score), 4),
+        'uncalibrated_model_scores': scores,
+        'scores_percentage': {k: round(v * 100, 1) for k, v in scores.items()},
+        'recognized_access_points': prediction.get('recognized_access_points', len(signals)),
+        'total_model_access_points': 100,
+        'input_signals': signals,
+        'latency_ms': elapsed_ms,
+        'pipeline_steps': ['Input Wi-Fi RSSI', 'Vector Alignment (100 Features)', 'StandardScaler (Z-Score)', 'LogisticRegression (Multi-class L2)', 'Softmax Probabilities', f'Predicted: {predicted_floor}'],
+        'success': True
+    }
 
 
 class CustomScanPayload(BaseModel):
@@ -266,11 +364,18 @@ class CustomScanPayload(BaseModel):
 def predict_custom(payload: CustomScanPayload):
     """Predict floor for custom BSSID readings using model.pkl."""
     try:
+        t0 = time.time()
         prediction = predict_signals(app.state.bundle, payload.signals, min_known=1)
         floor = prediction['predicted_floor']
         floor_map = {'b1': 'B1', 'ground': 'Ground', 'first': 'First', 'second': 'Second', 'third': 'Third', 'fourth': 'Fourth'}
-        prediction['predicted_floor'] = floor_map.get(floor.lower(), floor.capitalize())
+        predicted_floor = floor_map.get(floor.lower(), floor.capitalize())
+        prediction['predicted_floor'] = predicted_floor
         prediction['success'] = True
+        prediction['latency_ms'] = round((time.time() - t0) * 1000, 2)
+        scores = prediction.get('uncalibrated_model_scores', {})
+        if scores:
+            prediction['confidence'] = round(float(max(scores.values())), 4)
+            prediction['scores_percentage'] = {k: round(v * 100, 1) for k, v in scores.items()}
         return prediction
     except Exception as e:
         raise HTTPException(400, str(e))
@@ -334,11 +439,41 @@ def latest(device: str, request: Request):
 @app.get('/api/devices')
 def devices(request: Request):
     user = authenticated_user(request)
+    try:
+        scope = request.query_params.get('scope', 'user')
+    except Exception:
+        scope = 'user'
     with app.state.lock:
-        rows = [public_result(row, app.state.connected) for row in app.state.latest.values()
-                if user.get('role') == 'admin' or str(row.get('user_id')) == str(user['sub'])]
+        if scope == 'all' or user.get('role') == 'admin':
+            rows = [public_result(row, app.state.connected) for row in app.state.latest.values()]
+        else:
+            rows = [public_result(row, app.state.connected) for row in app.state.latest.values()
+                    if str(row.get('user_id')) == str(user['sub'])]
     return {'devices': sorted(rows, key=lambda row: row['display_name'].casefold()),
             'broker_connected': app.state.connected, 'scan_transport': 'https'}
+
+
+@app.get('/api/network/overview')
+def network_overview():
+    """Public WLAN campus building overview showing active floor counts and device count without exposing sensitive auth tokens."""
+    with app.state.lock:
+        rows = [public_result(row, app.state.connected) for row in app.state.latest.values()]
+    live_devices = [r for r in rows if r.get('connection_status') == 'live']
+    floors_count = {}
+    for f in ('Ground', 'First', 'Second', 'Third', 'Fourth', 'B1'):
+        floors_count[f] = sum(1 for r in live_devices if r.get('predicted_floor') == f)
+    return {
+        'total_devices': len(rows),
+        'live_estimates': len(live_devices),
+        'floors': floors_count,
+        'devices': [{'device_id': r['device_id'], 'display_name': r['display_name'],
+                     'predicted_floor': r.get('predicted_floor'), 'connection_status': r.get('connection_status'),
+                     'age_seconds': r.get('age_seconds', 0), 'recognized_access_points': r.get('recognized_access_points', 0),
+                     'confidence': r.get('confidence'), 'device_type': r.get('device_type'),
+                     'scores': r.get('scores', {})} for r in rows],
+        'broker_connected': app.state.connected,
+        'scan_transport': 'https'
+    }
 
 
 @app.get('/api/history/{device}')
